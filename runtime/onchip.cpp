@@ -5,7 +5,8 @@
 //
 // DIVU: a write to DVDNT (or DVDNTL) starts a 32/32 (or 64/32) signed
 // division; the quotient is read at once from DVDNT/DVDNTL, the remainder from
-// DVDNTH. Overflow sets DVCR.OVF. The FRT's counter runs from time at φ/8
+// DVDNTH, and both again from their shadows at 0x118/0x11C (written only by a
+// division or a store there, as in Mednafen). Overflow sets DVCR.OVF. The FRT's counter runs from time at φ/8
 // (TCR selects /8, /32, /128); SINIT/MINIT set the input-capture flag and
 // latch the count in FICR. The DMAC transfers at once when enabled in
 // auto-request mode.
@@ -62,6 +63,7 @@ static void divide(OnChip& o, bool wide) {
     }
     wr(o, 0x104, (uint32_t)q, 4); wr(o, 0x114, (uint32_t)q, 4);
     wr(o, 0x110, (uint32_t)r, 4);
+    wr(o, 0x118, (uint32_t)r, 4); wr(o, 0x11C, (uint32_t)q, 4);   // DVDNTH/DVDNTL's shadows (SGL reads 0x11C)
     // the unit's registers are mirrored at +0x20
     for (uint32_t k = 0x100; k < 0x120; k += 4) wr(o, k + 0x20, rd(o, k, 4), 4);
 }
@@ -77,19 +79,18 @@ static void dma(OnChip& o, int ch) {
     int ts = chcr >> 10 & 3, u = unit[ts];
     int sm = chcr >> 12 & 3, dm = chcr >> 14 & 3;
     auto step = [&](int mode) { return mode == 1 ? u : mode == 2 ? -u : 0; };
-    uint32_t n = ts == 3 ? tcr / 4 : tcr;   // 16-byte units count longwords
+    uint32_t n = ts == 3 ? (tcr + 3) / 4 : tcr;   // 16-byte units: TCR counts longwords
     for (uint32_t i = 0; i < n; ++i) {
         if (ts == 3) {
             for (int k = 0; k < 16; k += 4) st32(dar + (dm ? k : 0), ld32(sar + (sm ? k : 0)));
             sar += step(sm); dar += step(dm);
-            i += 3;
             continue;
         }
         uint32_t v = u == 1 ? ld8(sar) : u == 2 ? ld16(sar) : ld32(sar);
         if (u == 1) st8(dar, v); else if (u == 2) st16(dar, v); else st32(dar, v);
         sar += step(sm); dar += step(dm);
     }
-    sat_trace("DMAC %d: %u x %d bytes -> %08X", ch, tcr, u, rd(o, base + 4, 4));
+    sat_trace("DMAC %d: %u bytes %08X -> %08X", ch, ts == 3 ? n * 16 : tcr * u, rd(o, base, 4), rd(o, base + 4, 4));
     wr(o, base, sar, 4); wr(o, base + 4, dar, 4); wr(o, base + 8, 0, 4);
     wr(o, base + 0xC, chcr | 2, 4);          // TE
     if (chcr & 4) sat_fatal("DMAC %d: end interrupt requested, not emulated", ch);
