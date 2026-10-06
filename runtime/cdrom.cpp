@@ -3,8 +3,11 @@
 //
 // FADs are absolute: the first track's INDEX 01 is FAD 150. A file's first
 // sector follows the previous file's last; a track starts at its INDEX 01,
-// so a pregap stored in the file (INDEX 00) sits before it. Data tracks are
-// MODE1/2352 (raw) or MODE1/2048 (the header is made up).
+// so a pregap stored in the file (INDEX 00) sits before it. A PREGAP line is
+// a pregap the file does not hold (an older rip's one .bin keeps track 2's
+// so): it takes its place on the disc and reads as silence. Each track has
+// its own mode, also when several share a file. Data tracks are MODE1/2352
+// (raw) or MODE1/2048 (the header is made up).
 #include "saturn.h"
 #include <cstdio>
 #include <cstring>
@@ -12,9 +15,11 @@
 #include <sstream>
 #include <vector>
 
-struct CueFile { std::string path; uint32_t fad, sectors; int secsize; bool audio; FILE* f; };
+// A run of the disc's sectors: from one file (f, from its sector `sector`),
+// or a PREGAP held by no file (f null).
+struct Extent { uint32_t fad, count; FILE* f; uint32_t sector; int secsize; bool audio; };
 struct CueTrack { int num; uint32_t fad; bool audio; };
-static std::vector<CueFile> g_files;
+static std::vector<Extent> g_extents;
 static std::vector<CueTrack> g_tracks;
 static uint32_t g_leadout;
 
@@ -28,9 +33,10 @@ bool cdrom_open(const std::string& cue) {
     std::ifstream in(cue);
     if (!in) return false;
     std::string dir = cue.substr(0, cue.find_last_of("/\\") + 1), line;
-    uint32_t fad = 150;
-    int cur_track = 0;
-    bool cur_audio = false, first_file = true;
+    // the sheet as written: files, and each file's tracks with their indexes
+    struct T { int num; bool audio; int secsize; uint32_t gap; int64_t idx0 = -1, idx1 = -1; };
+    struct F { FILE* f; uint32_t size; std::vector<T> tracks; };
+    std::vector<F> files;
     while (std::getline(in, line)) {
         std::istringstream ss(line);
         std::string kw;
@@ -38,63 +44,84 @@ bool cdrom_open(const std::string& cue) {
         if (kw == "FILE") {
             size_t q1 = line.find('"'), q2 = line.rfind('"');
             std::string name = q1 != std::string::npos && q2 > q1 ? line.substr(q1 + 1, q2 - q1 - 1) : "";
-            if (!first_file) {
-                CueFile& p = g_files.back();
-                fad = p.fad + p.sectors;
-            }
-            first_file = false;
             FILE* f = std::fopen((dir + name).c_str(), "rb");
             if (!f) { std::fprintf(stderr, "cannot open %s\n", (dir + name).c_str()); return false; }
             std::fseek(f, 0, SEEK_END);
-            long size = std::ftell(f);
-            g_files.push_back({dir + name, fad, 0, 2352, false, f});
-            g_files.back().sectors = (uint32_t)(size / 2352);   // fixed below for 2048-byte files
-        } else if (kw == "TRACK") {
+            files.push_back({f, (uint32_t)std::ftell(f), {}});
+        } else if (kw == "TRACK" && !files.empty()) {
+            int num = 0;
             std::string mode;
-            ss >> cur_track >> mode;
-            cur_audio = mode == "AUDIO";
-            CueFile& f = g_files.back();
-            f.audio = cur_audio;
-            if (mode == "MODE1/2048") {
-                f.secsize = 2048;
-                std::fseek(f.f, 0, SEEK_END);
-                f.sectors = (uint32_t)(std::ftell(f.f) / 2048);
-            }
-        } else if (kw == "INDEX") {
+            ss >> num >> mode;
+            files.back().tracks.push_back({num, mode == "AUDIO", mode == "MODE1/2048" ? 2048 : 2352, 0});
+        } else if (kw == "PREGAP" && !files.empty() && !files.back().tracks.empty()) {
+            std::string pos;
+            ss >> pos;
+            files.back().tracks.back().gap = msf(pos);
+        } else if (kw == "INDEX" && !files.empty() && !files.back().tracks.empty()) {
             int idx;
             std::string pos;
             ss >> idx >> pos;
-            if (idx == 1) g_tracks.push_back({cur_track, g_files.back().fad + msf(pos), cur_audio});
+            T& t = files.back().tracks.back();
+            if (idx == 0) t.idx0 = msf(pos);
+            if (idx == 1) t.idx1 = msf(pos);
         }
     }
-    if (g_files.empty() || g_tracks.empty()) return false;
-    g_leadout = g_files.back().fad + g_files.back().sectors;
+    // laid out on the disc
+    uint32_t fad = 150;
+    for (const F& f : files) {
+        for (size_t i = 0; i < f.tracks.size(); ++i) {
+            const T& t = f.tracks[i];
+            if (t.idx1 < 0) return false;
+            // a file's first track takes it from its first sector, a later one from its INDEX 00
+            uint32_t start = i == 0 ? 0 : (uint32_t)(t.idx0 >= 0 ? t.idx0 : t.idx1);
+            uint32_t end = f.size / t.secsize;
+            if (i + 1 < f.tracks.size()) {
+                const T& n = f.tracks[i + 1];
+                end = (uint32_t)(n.idx0 >= 0 ? n.idx0 : n.idx1);
+            }
+            if (t.gap) {
+                g_extents.push_back({fad, t.gap, nullptr, 0, t.secsize, t.audio});
+                fad += t.gap;
+            }
+            g_tracks.push_back({t.num, fad + (uint32_t)t.idx1 - start, t.audio});
+            if (end > start) {
+                g_extents.push_back({fad, end - start, f.f, start, t.secsize, t.audio});
+                fad += end - start;
+            }
+        }
+    }
+    if (g_extents.empty() || g_tracks.empty()) return false;
+    g_leadout = fad;
     return true;
 }
 
-static const CueFile* file_of(uint32_t fad) {
-    for (const CueFile& f : g_files)
-        if (fad >= f.fad && fad < f.fad + f.sectors) return &f;
+static const Extent* extent_of(uint32_t fad) {
+    for (const Extent& e : g_extents)
+        if (fad >= e.fad && fad < e.fad + e.count) return &e;
     return nullptr;
 }
 
 bool cdrom_is_audio(uint32_t fad) {
-    const CueFile* f = file_of(fad);
-    return f && f->audio;
+    const Extent* e = extent_of(fad);
+    return e && e->audio;
 }
 
 bool cdrom_read(uint32_t fad, uint8_t* raw) {
-    const CueFile* f = file_of(fad);
-    if (!f) return false;
-    long pos = (long)(fad - f->fad) * f->secsize;
-    std::fseek(f->f, pos, SEEK_SET);
-    if (f->secsize == 2352) return std::fread(raw, 1, 2352, f->f) == 2352;
+    const Extent* e = extent_of(fad);
+    if (!e) return false;
+    if (!e->f) {                                // a PREGAP the file does not hold: silence
+        std::memset(raw, 0, 2352);
+        return true;
+    }
+    long pos = (long)(e->sector + (fad - e->fad)) * e->secsize;
+    std::fseek(e->f, pos, SEEK_SET);
+    if (e->secsize == 2352) return std::fread(raw, 1, 2352, e->f) == 2352;
     // MODE1/2048: sync, header (BCD MSF, mode 1), data; EDC/ECC left zero
     std::memset(raw, 0, 2352);
     std::memset(raw + 1, 0xFF, 10);
     auto bcd = [](uint32_t v) { return (uint8_t)((v / 10) << 4 | (v % 10)); };
     raw[12] = bcd(fad / 75 / 60); raw[13] = bcd(fad / 75 % 60); raw[14] = bcd(fad % 75); raw[15] = 1;
-    return std::fread(raw + 16, 1, 2048, f->f) == 2048;
+    return std::fread(raw + 16, 1, 2048, e->f) == 2048;
 }
 
 int cdrom_tracks(CdTrack* out, int max) {

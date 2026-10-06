@@ -11,6 +11,8 @@ CUE   One FILE per track (Redump) or one FILE for all (older rips). Track 1 is
       data (MODE1/2352, or MODE1/2048 for a plain .iso); the others are
       usually CD-DA (AUDIO, 2352-byte frames of 16-bit stereo 44.1 kHz,
       little-endian). INDEX 00 is the pregap, INDEX 01 the start of the track.
+      A PREGAP line is a pregap that is not in the file (silence on the
+      disc, as an older rip of one .bin for every track keeps track 2's).
       Disc time (MSF, 75 frames a second) starts at 00:02:00 = LBA 0.
 
 Data  A MODE1/2352 sector is 12 sync bytes, 4 header bytes (M S F mode),
@@ -70,6 +72,7 @@ class Track:
         self.number, self.mode, self.path = number, mode, path
         self.file_offset = file_offset   # byte offset of INDEX 01 in path
         self.pregap = pregap             # frames between INDEX 00 and 01
+        self.gap = 0                     # frames of a PREGAP not in the file, before those
         self.sector_size = 2048 if mode == "MODE1/2048" else SECTOR_RAW
         self.user_offset = 24 if mode.startswith("MODE2") else 16
         self.frames = 0                  # filled in by parse_cue
@@ -105,6 +108,10 @@ def parse_cue(path):
             cur = Track(int(m.group(1)), m.group(2), cur_file, None, 0)
             tracks.append(cur)
             continue
+        m = re.match(r"PREGAP\s+(\S+)", tok)
+        if m and cur:
+            cur.gap = _msf(m.group(1))
+            continue
         m = re.match(r"INDEX\s+(\d+)\s+(\S+)", tok)
         if m and cur:
             n, t = int(m.group(1)), _msf(m.group(2))
@@ -125,7 +132,7 @@ def parse_cue(path):
             t.frames = (end - t.file_offset) // t.sector_size
     lba = 0
     for t in tracks:
-        lba += t.pregap
+        lba += t.gap + t.pregap
         t.lba = lba
         lba += t.frames
     return tracks
@@ -154,13 +161,15 @@ class Disc:
         """The track holding disc LBA `lba` (its pregap counted as its own)."""
         found = self.tracks[0]
         for t in self.tracks:
-            if t.lba - t.pregap <= lba:
+            if t.lba - t.pregap - t.gap <= lba:
                 found = t
         return found
 
     def raw_sector(self, lba):
         """(stored bytes, track) of the sector at disc LBA `lba`: 2352 bytes, or 2048 for a plain .iso."""
         t = self.track_at(lba)
+        if lba < t.lba - t.pregap:              # a PREGAP that is not in the file
+            return bytes(t.sector_size), t
         fh = self._fh.get(t.path)
         if fh is None:
             fh = self._fh[t.path] = open(t.path, "rb")
@@ -367,9 +376,10 @@ def main(argv=None):
         print("1st read file %s (%d bytes, lba %d)" % (fr.path, fr.size, fr.lba))
         print("tracks:")
         for t in d.tracks:
-            print("  %02d %-10s lba %6d  %6d frames  %s%s" % (
+            print("  %02d %-10s lba %6d  %6d frames  %s%s%s" % (
                 t.number, t.mode, t.lba, t.frames, _time(t.frames),
-                "  pregap %d" % t.pregap if t.pregap else ""))
+                "  pregap %d" % (t.gap + t.pregap) if t.gap + t.pregap else "",
+                " (%d not in the file)" % t.gap if t.gap else ""))
     if a.list:
         for r in d.iso.walk():
             extra = "  CD-DA, track %02d" % d.track_at(r.lba).number if d.is_cdda(r) else ""
