@@ -364,6 +364,7 @@ void sh2_trapa(SH2Context& c, uint32_t imm, uint32_t pc) {
 }
 
 void sh2_bad_return(SH2Context& c, uint32_t expected) {
+    if (sh2_is_landing(c.pc)) throw SH2Unwind{c.pc};    // a longjmp: back to the function that holds it
     sat_fatal("returned to %08X, expected %08X", c.pc, expected);
 }
 

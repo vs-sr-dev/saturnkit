@@ -743,6 +743,30 @@ class Program:
         # harmless for the recompiler (duplicated code), counted for the report
         self.shared = sum(1 for f in self.funcs.values()
                           for e in self.funcs if e != f.entry and e in f.code)
+        self.landings = self._landings()
+
+    def _landings(self):
+        """Addresses returned to that no call returns to: `mov.l #X,rn; lds rn,pr`,
+        then `rts` with PR unchanged (a task system's exit back into its
+        scheduler, a longjmp). The recompiler makes them labels its calls can
+        unwind to (emit.Body); the code there must be this program's."""
+        img, out = self.img, set()
+        for a in sorted(self.code):
+            ins = img.insn(a)
+            if ins.op != "lds" or ins.fmt != "lds Rm,pr":
+                continue
+            lit = self._literal_for(a, ins.m)
+            if not lit or lit[0] != "lit" or lit[1] not in self.code:
+                continue
+            for b in range(a + 2, a + 12, 2):
+                j = img.insn(b)
+                if b not in self.code or j.op in ("sts.l", "lds.l", "lds", "jsr", "bsr", "bsrf") \
+                        or j.op in TERMINATORS and j.op != "rts":
+                    break
+                if j.op == "rts":
+                    out.add(lit[1])
+                    break
+        return out
 
     def _boundary(self, a):
         p = a - 2

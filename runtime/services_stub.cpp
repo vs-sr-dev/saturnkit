@@ -18,6 +18,7 @@ void sh2_poll(SH2Context& c) { fail(c, "safe-point budget spent; pr", c.pr); }
 void sh2_sleep(SH2Context& c, uint32_t pc) { fail(c, "sleep at", pc); }
 void sh2_trapa(SH2Context& c, uint32_t imm, uint32_t pc) { (void)imm; fail(c, "trapa at", pc); }
 void sh2_bad_return(SH2Context& c, uint32_t expected) {
+    if (sh2_is_landing(c.pc)) throw SH2Unwind{c.pc};
     std::fprintf(stderr, "saturnkit: returned to %08X, expected %08X\n", c.pc, expected);
     std::exit(1);
 }

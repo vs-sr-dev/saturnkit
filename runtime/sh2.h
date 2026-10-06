@@ -37,6 +37,8 @@ struct SH2Module {
     const SH2FuncEntry* funcs;
     uint32_t nfuncs;
     uint32_t flags;                     // SH2_MODULE_*
+    const uint32_t* landings;           // addresses returned to without a call (a longjmp's targets)
+    uint32_t nlandings;
 };
 // An overlay is called at its base as a function and returns to its caller;
 // a call to any other module's base is a program start (sh2_program_start).
@@ -54,6 +56,11 @@ void     sh2_hook_set(uint32_t addr, int reg, uint32_t v);   // that hook sets r
 typedef void (*SH2HookFn)(SH2Context& c, uint32_t addr);
 void     sh2_hook_add(uint32_t addr, SH2HookFn fn);        // ... or runs fn (a game layer's)
 void     sh2_bad_return(SH2Context& c, uint32_t expected);   // rts/rte went elsewhere
+// A return to a landing of an active module, not to the call's own address:
+// thrown by sh2_bad_return, caught by the calls of the function holding the
+// landing, which go on there (the recompiler's emit.Body).
+struct SH2Unwind { uint32_t pc; };
+bool     sh2_is_landing(uint32_t pc);                   // core.cpp
 uint32_t sh2_io_read(uint32_t a, int size);             // anything outside the work RAMs (core.cpp)
 void     sh2_io_write(uint32_t a, uint32_t v, int size);
 uint32_t sh2_mmio_read(uint32_t a, int size);           // what sh2_io_* does not fold: the hardware

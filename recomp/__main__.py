@@ -167,9 +167,12 @@ class Module:
             for e in self.entries:
                 f.write("    {0x%08Xu, %s},\n" % (e, E.fname(e)))
             f.write("};\n\n")
-            f.write('extern const SH2Module module = {"%s", 0x%08Xu, %du, 0x%08Xu, funcs, %d, %s};\n'
+            land = sorted(prog.landings)
+            if land:
+                f.write("static const uint32_t landings[] = {%s};\n\n" % ", ".join("0x%08Xu" % t for t in land))
+            f.write('extern const SH2Module module = {"%s", 0x%08Xu, %du, 0x%08Xu, funcs, %d, %s, %s, %d};\n'
                     % (self.name, self.base, len(self.data), self.crc, len(self.entries),
-                       "SH2_MODULE_OVERLAY" if self.overlay else "0"))
+                       "SH2_MODULE_OVERLAY" if self.overlay else "0", "landings" if land else "nullptr", len(land)))
             f.write("\n}  // namespace %s\n" % self.ns)
         self.files.append(self.ns + "_table.cpp")
 

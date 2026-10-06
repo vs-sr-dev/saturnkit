@@ -115,6 +115,14 @@ void sh2_activate(const SH2Module* m) {
     std::fprintf(stderr, "saturnkit: more than %d modules active\n", kSlots);
 }
 
+bool sh2_is_landing(uint32_t pc) {
+    for (const SH2Module* m : g_active)
+        if (m)
+            for (uint32_t i = 0; i < m->nlandings; ++i)
+                if (m->landings[i] == pc) return true;
+    return false;
+}
+
 SH2Func sh2_lookup(uint32_t addr) {
     if (addr >> 29 == 1) addr &= 0x1FFFFFFFu;           // code run cache-through
     for (const SH2Module* m : g_active) {

@@ -17,7 +17,11 @@ into a C++ function:
   target analysis expects and otherwise dispatch: a wrong guess costs a
   lookup, never a wrong call;
 * safe points (SH2_POLL) at loop back-edges, before calls and after
-  `ldc ...,sr`.
+  `ldc ...,sr`;
+* in a function holding a landing (an address the program returns to
+  without a call, discover.Program.landings: a longjmp's target), every call
+  catches SH2Unwind and goes on at the landing it names; the runtime throws
+  it when a return goes to a landing instead of the call's own address.
 
 Every multi-statement instruction is its own block, so a `goto` never
 crosses an initialisation.
@@ -274,6 +278,7 @@ class Body:
         self.sites = {}
         self.unknown = []
         self._targets = self._resolve()
+        self.land = sorted(set(getattr(prog, "landings", ())) & f.code)
 
     # -- analysis
     def _resolve(self):
@@ -374,8 +379,15 @@ class Body:
             return "sh2_call(c, x); return;"
         return "%sswitch (x) { %s default: sh2_call(c, x); return; }" % (poll, " ".join(cases))
 
+    def _unwind(self, call):
+        """A call that a longjmp to one of this function's landings unwinds to."""
+        if not self.land:
+            return call
+        cases = " ".join("if (u.pc == %s) goto L_%08X;" % (_h(t), t) for t in self.land)
+        return "try { %s } catch (const SH2Unwind& u) { %s throw; }" % (call, cases)
+
     def labels(self):
-        out = set()
+        out = set(self.land)
         code = self.f.code
         self._fallback = sorted(a for a in code if a not in self.slots)
         for a, ins in self.ops.items():
@@ -409,11 +421,12 @@ class Body:
         if op == "bra":
             return s + self._goto(ins.target, a), None
         if op == "bsr":
-            return "c.pr = %s; %sSH2_POLL(c); %s SH2_RET(c, %s);" % (ret, s, self._call(ins.target), ret), a + 4
+            return ("c.pr = %s; %sSH2_POLL(c); %s SH2_RET(c, %s);"
+                    % (ret, s, self._unwind(self._call(ins.target)), ret), a + 4)
         if op in ("jsr", "bsrf"):
             x = _r(ins.n) if op == "jsr" else "%s + %s" % (ret, _r(ins.n))
             return ("{ const uint32_t x = %s; c.pr = %s; %sSH2_POLL(c); %s SH2_RET(c, %s); }"
-                    % (x, ret, s, self._dcall(a), ret), a + 4)
+                    % (x, ret, s, self._unwind(self._dcall(a)), ret), a + 4)
         if op in ("jmp", "braf"):
             x = _r(ins.n) if op == "jmp" else "%s + %s" % (ret, _r(ins.n))
             return "{ const uint32_t x = %s; %s%s }" % (x, s, self._djump(a)), None
