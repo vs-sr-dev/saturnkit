@@ -80,12 +80,12 @@ void mmio_log_write(const std::string& path) {
 }
 
 // ---- memory with no device behind it (yet) ------------------------------------------------------
-static uint8_t g_backup[0x10000];       // backup RAM, odd bytes
+static uint8_t g_backup[0x10000];       // backup RAM, odd bytes; 0x00180000-0x001FFFFF repeats it every 64 KiB (Mednafen)
 static uint8_t g_cache[2][0x1000];      // each CPU's cache as RAM (0xC0000000)
 
 static const char* area_of(uint32_t a) {
     if (a < 0x00080000u) return "BIOS ROM";
-    if (a >= 0x00180000u && a < 0x00190000u) return "backup RAM";
+    if (a >= 0x00180000u && a < 0x00200000u) return "backup RAM";
     if (a >= 0x02000000u && a < 0x05000000u) return "A-bus cartridge";
     if (a >= 0x05A00000u && a < 0x05B00000u) return "SCSP RAM";
     if (a >= 0x05C00000u && a < 0x05C80000u) return "VDP1 VRAM";
@@ -102,7 +102,7 @@ uint32_t sh2_mmio_read(uint32_t a, int size) {
     if (area != 0) { log_area("cache address array", a, 'R'); return 0; }
     if (const char* n = area_of(a)) {
         log_area(n, a, 'R');
-        if (a >= 0x00180000u && a < 0x00190000u) return mem_rd(g_backup, a & 0xFFFF, size);
+        if (a >= 0x00180000u && a < 0x00200000u) return mem_rd(g_backup, a & 0xFFFF, size);
         if (video_owns(a)) return video_read(a, size);
         if (a >= 0x02000000u && a < 0x05000000u) return size == 1 ? 0xFF : size == 2 ? 0xFFFF : 0xFFFFFFFFu;
         return 0;                               // the BIOS ROM is not here
@@ -125,7 +125,7 @@ void sh2_mmio_write(uint32_t a, uint32_t v, int size) {
     if (area != 0) { log_area(area == 2 ? "cache purge" : "cache address array", a, 'W'); return; }
     if (const char* n = area_of(a)) {
         log_area(n, a, 'W');
-        if (a >= 0x00180000u && a < 0x00190000u) { mem_wr(g_backup, a & 0xFFFF, v, size); return; }
+        if (a >= 0x00180000u && a < 0x00200000u) { mem_wr(g_backup, a & 0xFFFF, v, size); return; }
         if (video_owns(a)) { video_write(a, v, size); return; }
         return;                                 // ROM, no cartridge
     }
