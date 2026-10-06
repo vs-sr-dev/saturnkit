@@ -2,14 +2,15 @@
 //
 // The host writes a command into CR1-CR4 (CR4 last) and reads the answer
 // from the same registers; HIRQ holds the flags (writing clears the bits
-// written as 0). Commands complete at once. The drive delivers sectors of
-// the disc (cdrom.cpp) at double speed while it plays: each goes from the
-// CD device connection through the filters (FAD range, subheader) into a
+// written as 0). Commands complete at once. The drive seeks (timed as
+// Mednafen's drive does it, ST_SEEK meanwhile), then delivers sectors of the
+// disc (cdrom.cpp) at double speed, 150 a second: each goes from the CD
+// device connection through the filters (FAD range, subheader) into a
 // partition of the 200-sector buffer, where the host gets it through the
 // data port (0x25818000). CD-DA plays at 75 sectors a second; each sector's
 // 588 stereo samples go to the SCSP's external input (cd_audio_sample, taken
-// by sound.cpp once a sample). The file-system commands (0x70-0x75) work on the ISO
-// 9660 directory the way the CD block's own firmware does.
+// by sound.cpp once a sample). The file-system commands (0x70-0x75) work on
+// the ISO 9660 directory the way the CD block's own firmware does.
 //
 // Command set and answer layouts: Sega's CD block documentation as used by
 // SBL's CDC library; where the documents leave a value open, the choice is
@@ -50,6 +51,7 @@ static int g_repeat, g_repeat_left, g_repeats_done;
 static uint32_t g_cmd_start, g_cmd_end;         // the last Play's positions, as the command gave them
 static bool g_audio_play;
 static uint64_t g_play_t0, g_play_done;         // time the play began, sectors read since
+static uint64_t g_seek_end;                     // ST_SEEK: when the pickup is there and the play begins
 static int g_getlen = 2048;
 static std::deque<int16_t> g_cdda;              // the audio played, not yet taken by the SCSP (L, R)
 
@@ -203,8 +205,13 @@ static void play_ended() {
 
 void cd_tick() {
     uint64_t now = sat_now();
+    if (g_status == ST_SEEK && now >= g_seek_end) {
+        g_status = ST_PLAY;
+        g_play_t0 = g_seek_end;
+        g_play_done = 0;
+    }
     if (g_status == ST_PLAY) {
-        uint64_t rate = g_audio_play ? 75 : 150 * 2;
+        uint64_t rate = g_audio_play ? 75 : 150;
         uint64_t due = (now - g_play_t0) * rate / 1000000000ull;
         while (g_play_done < due && g_status == ST_PLAY) {
             if (g_fad >= g_play_end || g_fad < g_play_start) { play_ended(); break; }
@@ -291,11 +298,23 @@ static void start_play(uint32_t start, uint32_t end, int mode) {
     g_repeat_left = g_repeat;
     g_repeats_done = 0;
     g_play_start = from;
+    bool reading_on = (mode & 0x80) && g_status == ST_PLAY;
+    int64_t delta = (mode & 0x80) ? 0 : (int64_t)from - (int64_t)g_fad;
     if (!(mode & 0x80)) g_fad = from;
     g_audio_play = cdrom_is_audio(g_fad);
-    g_status = ST_PLAY;
-    g_play_t0 = sat_now();
-    g_play_done = 0;
+    if (reading_on) {
+        g_play_t0 = sat_now();
+        g_play_done = 0;
+    } else {
+        // the seek, Mednafen's drive timing in its clock of 44 100 x 256 Hz: the start (255 500),
+        // 12 sectors' time, 26 a sector forward or 28 back, a sector's time more back or from 150
+        // sectors on, a sector's time to read the subcode; the first sector a sector's time later
+        const uint64_t sector = 44100 * 256 / 150;
+        uint64_t clocks = 255500 + 12 * sector + (uint64_t)(delta < 0 ? -delta * 28 : delta * 26)
+                        + (delta < 0 || delta >= 150 ? sector : 0) + sector;
+        g_status = ST_SEEK;
+        g_seek_end = sat_now() + clocks * 1000000000ull / (44100 * 256);
+    }
     if (g_audio_play)
         sat_note("CD-DA: play track %d, FAD %u-%u, repeat %d", track_of(g_fad, nullptr), g_fad,
                  g_play_end, g_repeat);
