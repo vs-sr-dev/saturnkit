@@ -52,6 +52,10 @@ static uint32_t g_cmd_start, g_cmd_end;         // the last Play's positions, as
 static bool g_audio_play;
 static uint64_t g_play_t0, g_play_done;         // time the play began, sectors read since
 static uint64_t g_seek_end;                     // ST_SEEK: when the pickup is there and the play begins
+static bool g_no_sector_yet;                    // after a seek, until the first sector: still shown as SEEK
+
+// the status shown: PLAY only once a sector has come after a seek, as Mednafen's
+static uint8_t shown_status() { return g_status == ST_PLAY && g_no_sector_yet ? ST_SEEK : g_status; }
 static int g_getlen = 2048;
 static std::deque<int16_t> g_cdda;              // the audio played, not yet taken by the SCSP (L, R)
 
@@ -100,7 +104,7 @@ static int track_of(uint32_t fad, uint32_t* ctrladr) {
 static void report() {
     uint32_t ctrladr;
     int track = track_of(g_fad, &ctrladr);
-    uint8_t st = g_status | (g_xfer != X_NONE ? ST_TRNS : 0);
+    uint8_t st = shown_status() | (g_xfer != X_NONE ? ST_TRNS : 0);
     g_out[0] = (uint16_t)(st << 8 | (g_repeats_done & 0xF));
     g_out[1] = (uint16_t)(ctrladr << 8 | track);
     g_out[2] = (uint16_t)(1 << 8 | (g_fad >> 16 & 0xFF));
@@ -111,7 +115,7 @@ static void answer(uint16_t a, uint16_t b, uint16_t c, uint16_t d) {
     g_out[0] = a; g_out[1] = b; g_out[2] = c; g_out[3] = d;
 }
 
-static uint16_t status_hi() { return (uint16_t)((g_status | (g_xfer != X_NONE ? ST_TRNS : 0)) << 8); }
+static uint16_t status_hi() { return (uint16_t)((shown_status() | (g_xfer != X_NONE ? ST_TRNS : 0)) << 8); }
 
 static uint32_t track_fad(int track, bool end) {
     CdTrack t[99];
@@ -209,6 +213,7 @@ void cd_tick() {
         g_status = ST_PLAY;
         g_play_t0 = g_seek_end;
         g_play_done = 0;
+        g_no_sector_yet = true;
     }
     if (g_status == ST_PLAY) {
         uint64_t rate = g_audio_play ? 75 : 150;
@@ -224,6 +229,7 @@ void cd_tick() {
                 for (int i = 0; i < 2352; i += 2) g_cdda.push_back((int16_t)(raw[i] | raw[i + 1] << 8));
             ++g_fad;
             ++g_play_done;
+            g_no_sector_yet = false;
         }
     }
     if (now >= g_next_peri) {                   // the periodic report
