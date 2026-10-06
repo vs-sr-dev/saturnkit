@@ -45,7 +45,8 @@ static bool listed(const std::string& list, const std::string& item) {
     return !list.empty() && ("," + list + ",").find("," + item + ",") != std::string::npos;
 }
 
-// --dump: VDP1 VRAM, its draw framebuffer, VDP2 VRAM, CRAM, VDP1's and VDP2's registers, one after the other
+// --dump: VDP1 VRAM, its draw framebuffer, VDP1's registers, VDP2 VRAM, CRAM, VDP2's registers,
+// one after the other (big-endian words)
 static void dump(const char* prefix, uint64_t n) {
     char path[512];
     std::snprintf(path, sizeof path, "%s/dump-%s%llu.bin", g_cfg.out.c_str(), prefix, (unsigned long long)n);
@@ -54,6 +55,7 @@ static void dump(const char* prefix, uint64_t n) {
     vdp1_dump(f);
     std::fwrite(g_vdp2_vram, 1, sizeof g_vdp2_vram, f);
     std::fwrite(g_vdp2_cram, 1, sizeof g_vdp2_cram, f);
+    std::fwrite(g_vdp2_regs, 1, 0x200, f);
     std::fclose(f);
 }
 

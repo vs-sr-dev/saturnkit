@@ -276,7 +276,7 @@ static void note_unsupported() {
     once(0, reg(0x20) & 0x30, "RBG0/RBG1", reg(0x20));
     once(1, reg(0x9A) & 0x3F3F, "line or vertical cell scroll (SCRCTL)", reg(0x9A));
     once(2, reg(0x22) & 0xF, "mosaic (MZCTL)", reg(0x22));
-    once(3, (reg(0xC0) | reg(0xC2) | reg(0xC4) | reg(0xC6)) & 0x2A2A, "windows (WCTL)", reg(0xC0));
+    once(3, (reg(0xD0) | reg(0xD2) | reg(0xD4) | reg(0xD6)) & 0x2A2A, "windows (WCTL)", reg(0xD0) | reg(0xD2) | reg(0xD4) | reg(0xD6));
     once(4, reg(0xE2) & 0x13F, "shadows on VDP2's layers (SDCTL)", reg(0xE2));
     once(5, reg(0xEC) & 0x8600 && reg(0xEC) & 0x5F, "extended colour calculation or gradation (CCCTL)", reg(0xEC));
     once(6, (reg(0x00) & 7) >= 2, "a high or exclusive resolution (TVMD)", reg(0x00));
