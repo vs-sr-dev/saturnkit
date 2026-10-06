@@ -105,6 +105,10 @@ def _transfer(img, ins, st):
         v = st[ins.n]
         st[ins.n] = None if v is None else (v + ins.imm) & 0xFFFFFFFF
         return
+    if op == "add" and f == "add Rm,Rn":   # SHC's -pic: mova LABEL,r0; add r0,rn
+        v, w = st[ins.n], st[ins.m]
+        st[ins.n] = None if v is None or w is None else (v + w) & 0xFFFFFFFF
+        return
     for r in _writes(ins):
         st[r] = None
 
@@ -136,6 +140,7 @@ class Program:
         self._pending = list(seeds) or [img.base]
         self._rejected = set()
         self._data_addrs, self._scanned = set(), set()   # _data_addresses, incrementally
+        self._scanned_pic = set()                         # _computed_seeds, likewise
         self._lits, self._lit_scanned = set(), set()     # _literal_values, likewise
         self.run()
 
@@ -564,7 +569,10 @@ class Program:
                 v = consts.get(at, {}).get(self.img.insn(at).n)
                 if v is None:
                     f.unresolved.append((at, what))
-                elif what == "jsr":
+                    continue
+                if what in ("bsrf", "braf"):
+                    v = (at + 4 + v) & 0xFFFFFFFF
+                if what in ("jsr", "bsrf"):
                     f.calls.add(v)
                 elif (v in self.funcs and v != entry) or not self.inside(v):
                     f.tails.add(v)
@@ -633,7 +641,7 @@ class Program:
                 f.calls.add(ins.target)
                 a += 4
             elif op == "bsrf":
-                f.unresolved.append((a, "bsrf"))
+                pending.append((a, "bsrf"))       # PC-relative: a + 4 + the register
                 a += 4
             elif op == "jsr":
                 r = self._literal_for(a, ins.n)
@@ -705,7 +713,7 @@ class Program:
                         f.tables.add(table + k)
                     work.extend(targets)
                 else:
-                    f.unresolved.append((a, "braf"))
+                    pending.append((a, "braf"))
                 return
             elif op in ("rts", "rte"):
                 return
@@ -727,6 +735,8 @@ class Program:
                 added = self._prologue_seeds()
             if not added:
                 added = self._address_taken()
+            if not added:
+                added = self._computed_seeds()
             if not added:
                 break
         # branches into another function's entry found later are tail calls:
@@ -913,6 +923,57 @@ class Program:
                     continue
                 self._descend(v)
                 added += 1
+        return added
+
+    def _computed_seeds(self):
+        """Addresses position-independent code computes, `mov.l #k,rn; mova T,r0;
+        add r0,rn` (SHC's -pic), that nothing calls or jumps to directly: a
+        function pointer handed on (a task's handler, a callback). Taken
+        when they start at a boundary and descend into clean code that meets
+        no known data; a data address the code computes the same way fails
+        these as a prologue seed would."""
+        img, added = self.img, 0
+        todo = sorted(self.code - self._scanned_pic)
+        self._scanned_pic |= set(todo)
+        for a in todo:
+            ins = img.insn(a)
+            if ins.op != "add" or ins.fmt != "add Rm,Rn" or ins.m != 0 or ins.n == 0:
+                continue
+            t = None
+            for b in range(a - 2, a - 34, -2):          # the mova that set r0, in the straight line
+                if b not in self.code:
+                    break
+                j = img.insn(b)
+                if j.op == "mova":
+                    t = j.target
+                    break
+                if 0 in _writes(j) or j.op in TERMINATORS or j.op in ("bt", "bf", "bt/s", "bf/s", "jsr", "bsr", "bsrf"):
+                    break
+            lit = self._literal_for(a, ins.n) if t is not None else None
+            if not lit or lit[0] != "lit":
+                continue
+            v = (t + lit[1]) & 0xFFFFFFFF
+            if v & 1 or not self.inside(v) or v in self.funcs or v in self.data or v in self._rejected:
+                continue
+            known = v in self.code              # reached inside another function: an entry of its own too
+            # a boundary, or right after a terminator and its slot, reached or not
+            # (a `braf` too, when it is not a switch: SHC's -pic tail jump)
+            after = self.inside(v - 4) and v - 4 not in self.switches and \
+                sh2.decode(img.u16(v - 4), v - 4).op in ("rts", "rte", "bra", "jmp", "braf")
+            # or after a literal pool, known or not (a halfword no instruction has)
+            after = after or any(self.inside(v - k) and sh2.decode(img.u16(v - k), v - k).op == ".word"
+                                 for k in (2, 4))
+            if not known and not self._boundary(v) and not after:
+                continue
+            f, data = self._descend(v, commit=False)
+            if f.bad or not known and (f.code & self.data or data & self.code):
+                self._rejected.add(v)
+                continue
+            self._descend(v)
+            for t2 in f.calls | f.tails:
+                if t2 not in self.funcs and self.inside(t2):
+                    self._pending.append(t2)
+            added += 1
         return added
 
     @staticmethod
