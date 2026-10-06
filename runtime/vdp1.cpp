@@ -386,11 +386,19 @@ static void draw() {
     }
     uint32_t a = 0, ret = 0, last = 0;
     int n = 0;
+    bool invalid = false;
     for (int guard = 0; guard < 20000; ++guard) {
         uint16_t ctrl = vw(a);
         last = a;
         if (ctrl & 0x8000) break;
         int jp = ctrl >> 12 & 7;
+        // a command VDP1 does not know (0xC-0xF) stops the draw where it is, with no end
+        // status or interrupt (Mednafen's VDP1; a game's list may run into stale slots)
+        if (!(jp & 4) && (ctrl & 0xF) >= 0xC) {
+            sat_trace("VDP1: command %X at %05X ends the draw", ctrl & 0xF, a);
+            invalid = true;
+            break;
+        }
         if (!(jp & 4)) {
             RecCmd rc;
             rc.addr = a;
@@ -413,7 +421,7 @@ static void draw() {
     g_reg[LOPR] = (uint16_t)(last >> 3);
     g_reg[COPR] = (uint16_t)(last >> 3);
     ++g_draws;
-    g_drawing = true;
+    g_drawing = !invalid;
     g_draw_end = sat_now() + 1000000;           // 1 ms
     sat_trace("VDP1 draw %llu: %d commands", (unsigned long long)g_draws, n);
 }
