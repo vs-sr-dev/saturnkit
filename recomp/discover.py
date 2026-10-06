@@ -821,10 +821,12 @@ class Program:
             # record (passed to a function, or in a table of pointers) can decode
             # cleanly for a few halfwords; a handler is longer
             # (not rejected for good: it may yet become a boundary)
-            # (but `rts; nop` loaded as a literal is a callback that does nothing)
+            # (but `rts; nop` loaded as a literal is a callback that does nothing,
+            # and a descent wholly in code already found is code: another entry
+            # into it, as the short tail entries of an unrolled copy's table)
             weak = not self._boundary(v) and not self._is_prologue(self.img.u16(v))
             empty = v in literals and self.img.contains(v, 4) and self.img.u32(v) == 0x000B0009
-            if weak and len(f.code) < 8 and not empty:
+            if weak and len(f.code) < 8 and not empty and not f.code <= self.code:
                 continue
             self._descend(v)
             for t in f.calls | f.tails:
