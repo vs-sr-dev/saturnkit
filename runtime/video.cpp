@@ -96,15 +96,25 @@ uint64_t video_next_line(uint64_t now) {
     return (now / line_ns + 1) * line_ns;
 }
 
+// VDP1 takes the VBlank's end at the next HBlank (Mednafen's SetHBVB), while
+// the SCU raises VBlank-OUT at once: a VBlank-OUT handler that asks for a
+// frame change (FBCR) right away gets it in the same blanking. Here the
+// change waits for a line entered by a later call than the one that raised
+// the interrupt, so that the CPU has been offered the interrupt first.
+static bool g_vdp1_vbout;
+
 void video_tick(uint64_t now) {
     uint64_t target = now / (kFrameNs / kLines);
+    bool vdp1_due = g_vdp1_vbout;
     while (g_line_abs < target) {
         ++g_line_abs;
         int line = (int)(g_line_abs % kLines);
+        if (vdp1_due) { vdp1_vblank_out(); vdp1_due = g_vdp1_vbout = false; }
         if (line == 0) {
             g_raster.clear();
             std::copy(g_vdp2_regs, g_vdp2_regs + 0x200, g_field_regs);
-            vdp1_vblank_out(); scu_raise(IRQ_VBLANK_OUT); scu_frame_event(1);
+            scu_raise(IRQ_VBLANK_OUT); scu_frame_event(1);
+            g_vdp1_vbout = true;
         }
         if (line == display_lines()) vblank_in(g_line_abs * (kFrameNs / kLines));
         scu_raise(IRQ_HBLANK_IN);
