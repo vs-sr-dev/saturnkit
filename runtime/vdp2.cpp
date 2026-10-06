@@ -4,7 +4,10 @@
 // What is done: the four normal scroll screens (NBG0-NBG3) in cell mode
 // (1x1 or 2x2 cells, 1- or 2-word pattern names with the supplement, plane
 // sizes, map offsets, 16/256/2048 colours and RGB) and NBG0/NBG1 in bitmap
-// mode; NBG0/NBG1's fractional scroll and coordinate increments (zoom);
+// mode; NBG0/NBG1's fractional scroll and coordinate increments (zoom), and
+// their line scroll (X, Y and X zoom every 1-8 lines); the rotation screen
+// RBG0 (parameters A and B, by coefficient too, coefficient tables per line
+// or per dot in VRAM or colour RAM, cells or bitmap, screen-over);
 // the sprite layer from VDP1's framebuffer, every sprite type, palette and
 // RGB mixed (SPCLMD), with its priorities and colour-calculation ratios;
 // priorities with the chip's order for ties (sprite, NBG0, NBG1, NBG2,
@@ -12,7 +15,8 @@
 // add); the colour offsets A and B; the back screen (one colour or one a
 // line); windows 0 and 1 (rectangles or line tables, inside or outside, OR
 // or AND) on NBG0-NBG3 and the sprite layer; the display bit. What is not:
-// RBG0 and RBG1 (rotation), line and vertical-cell scroll, mosaic, the
+// RBG1, rotation parameters chosen by window, the coefficients' line colour,
+// vertical-cell scroll, mosaic, the
 // sprite window and the colour-calculation and rotation-parameter windows,
 // the line colour screen, special
 // priority and special colour calculation, shadows on VDP2's layers,
@@ -21,6 +25,7 @@
 #include "saturn.h"
 #include "video.h"
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 
 uint8_t g_vdp2_vram[0x80000], g_vdp2_cram[0x1000], g_vdp2_regs[0x200];
@@ -67,7 +72,7 @@ struct Pix {
     bool offset_b;                              // ... offset B rather than A
 };
 
-enum { L_SPRITE, L_NBG0, L_NBG1, L_NBG2, L_NBG3, L_COUNT };
+enum { L_SPRITE, L_RBG0, L_NBG0, L_NBG1, L_NBG2, L_NBG3, L_COUNT };
 
 // ---- the scroll screens ---------------------------------------------------------------------
 struct Nbg {
@@ -84,7 +89,36 @@ struct Nbg {
     int32_t sx, sy, dx, dy;                     // scroll and increments, 8 fraction bits
     uint8_t prio, ratio;
     bool cc, offset, offset_b;
+    bool line;                                  // NBG0/NBG1's line scroll: each line's X scroll,
+    int32_t lx[256], ly[256], ldx[256];         // Y coordinate and X increment
 };
+
+// NBG0/NBG1's line scroll table (SCRCTL, LSTA): every 1, 2, 4 or 8 lines it gives an X scroll
+// added to SCX, a Y scroll added to SCY (the Y coordinate counts again from it) and an X
+// increment that replaces ZMXN, each two words (11 integer bits, then 8 fraction bits).
+static void setup_line_scroll(int n, Nbg& s, int lines) {
+    uint8_t sc = (uint8_t)(reg(0x9A) >> (n * 8));
+    if (!(sc & 0x0E)) return;
+    s.line = true;
+    int lss = sc >> 4 & 3;
+    uint32_t lsta = ((uint32_t)(reg(0xA0 + n * 4) & 7) << 16 | (reg(0xA2 + n * 4) & 0xFFFE)) * 2;
+    auto entry = [&](bool zoom) {
+        int32_t v = zoom ? (int32_t)((vw(lsta) & 7) << 8 | vw(lsta + 2) >> 8)
+                         : (int32_t)((vw(lsta) & 0x7FF) << 8 | vw(lsta + 2) >> 8);
+        lsta += 4;
+        return v;
+    };
+    int32_t x = s.sx, y = s.sy, dx = s.dx, acc = 0;
+    for (int l = 0; l < lines && l < 256; ++l) {
+        if ((l & ((1 << lss) - 1)) == 0) {
+            if (sc & 2) x = entry(false) + s.sx;
+            if (sc & 4) { acc = 0; y = entry(false) + s.sy; }
+            if (sc & 8) dx = entry(true);
+        }
+        s.lx[l] = x; s.ly[l] = y + acc; s.ldx[l] = dx;
+        acc += s.dy;
+    }
+}
 
 static void setup_nbg(int n, Nbg& s) {
     s = Nbg{};
@@ -148,6 +182,7 @@ static void setup_nbg(int n, Nbg& s) {
     s.cc = reg(0xEC) >> n & 1;
     s.offset = reg(0x110) >> n & 1;
     s.offset_b = reg(0x112) >> n & 1;
+    if (n < 2) setup_line_scroll(n, s, vdp2_lines());
 }
 
 // the dot of a character (or bitmap) at (x, y) in its own pixels: false if transparent
@@ -177,27 +212,26 @@ static bool dot(const Nbg& s, uint32_t base, int x, int y, int width, uint32_t p
     return true;
 }
 
-static bool nbg_pixel(const Nbg& s, int x, int y, Pix& p) {
-    uint32_t sx = (uint32_t)(s.sx + x * s.dx) >> 8, sy = (uint32_t)(s.sy + y * s.dy) >> 8;
-    if (s.bitmap) {
-        sx &= (uint32_t)s.bm_w - 1;
-        sy &= (uint32_t)s.bm_h - 1;
-        return dot(s, s.bm_addr, (int)sx, (int)sy, s.bm_w, s.bm_pal, p);
-    }
+// The cell of a map of planes (side x side of them, at the addresses in planes[]) at map
+// coordinates (sx, sy), already wrapped into the map; or, with pnd_over set, the cell named
+// by the pattern name *pnd_over (a rotation screen's screen-over pattern).
+static bool cell_pixel(const Nbg& s, const uint32_t* planes, int side, uint32_t sx, uint32_t sy, Pix& p,
+                       const uint16_t* pnd_over = nullptr) {
     uint32_t pw = (uint32_t)s.plane_w * 512, ph = (uint32_t)s.plane_h * 512;
-    sx &= pw * 2 - 1;                            // the map: 2x2 planes
-    sy &= ph * 2 - 1;
-    int pl = (sy >= ph ? 2 : 0) + (sx >= pw ? 1 : 0);
-    uint32_t ix = sx % pw, iy = sy % ph;
-    uint32_t page = (iy / 512) * (uint32_t)s.plane_w + ix / 512;
     int cs = s.cell2x2 ? 16 : 8;
-    uint32_t cx = (ix % 512) / (uint32_t)cs, cy = (iy % 512) / (uint32_t)cs;
-    uint32_t cpr = 512 / (uint32_t)cs;
-    uint32_t pnd_addr = s.plane[pl] + page * s.page_bytes + (cy * cpr + cx) * (s.word1 ? 2 : 4);
+    uint32_t ix = sx % pw, iy = sy % ph;
+    uint32_t pnd_addr = 0;
+    if (!pnd_over) {
+        int pl = (int)(sy / ph) * side + (int)(sx / pw);
+        uint32_t page = (iy / 512) * (uint32_t)s.plane_w + ix / 512;
+        uint32_t cx = (ix % 512) / (uint32_t)cs, cy = (iy % 512) / (uint32_t)cs;
+        uint32_t cpr = 512 / (uint32_t)cs;
+        pnd_addr = planes[pl] + page * s.page_bytes + (cy * cpr + cx) * (s.word1 ? 2 : 4);
+    }
     uint32_t chr, pal;
     bool hf, vf;
-    if (s.word1) {
-        uint16_t w = vw(pnd_addr);
+    if (s.word1 || pnd_over) {
+        uint16_t w = pnd_over ? *pnd_over : vw(pnd_addr);
         pal = s.colors == 0 ? (uint32_t)(w >> 12 & 0xF) | (s.supp >> 1 & 0x70) : (uint32_t)(w >> 8 & 0x70);
         if (!s.cnsm) {
             hf = w & 0x400; vf = w & 0x800;
@@ -221,6 +255,201 @@ static bool nbg_pixel(const Nbg& s, int x, int y, Pix& p) {
     uint32_t base = chr * 0x20;
     if (s.cell2x2) base += (uint32_t)((py >> 3) * 2 + (px >> 3)) * kCellBytes[s.colors];
     return dot(s, base, px & 7, py & 7, 8, pal, p);
+}
+
+static bool nbg_pixel(const Nbg& s, int x, int y, Pix& p) {
+    int32_t bx = s.sx, by = s.sy + y * s.dy, dx = s.dx;
+    if (s.line) { bx = s.lx[y]; by = s.ly[y]; dx = s.ldx[y]; }
+    uint32_t sx = (uint32_t)(bx + x * dx) >> 8, sy = (uint32_t)by >> 8;
+    if (s.bitmap) {
+        sx &= (uint32_t)s.bm_w - 1;
+        sy &= (uint32_t)s.bm_h - 1;
+        return dot(s, s.bm_addr, (int)sx, (int)sy, s.bm_w, s.bm_pal, p);
+    }
+    uint32_t pw = (uint32_t)s.plane_w * 512, ph = (uint32_t)s.plane_h * 512;
+    return cell_pixel(s, s.plane, 2, sx & (pw * 2 - 1), sy & (ph * 2 - 1), p);   // the map: 2x2 planes
+}
+
+// ---- the rotation screen RBG0 -----------------------------------------------------------------
+// Each dot's map coordinates come from rotation parameter A or B (RPMD: A, B, or B where A's
+// coefficient is transparent). A parameter is a table in VRAM (RPTA, A then B 0x80 bytes on):
+// the screen's start (Xst, Yst, Zst) and its steps per line (dXst, dYst) and per dot (dX, dY),
+// the matrix A-F, the viewpoint P, the centre C, the shift M and the scale kx, ky. A coefficient
+// table (KTCTL, KTAOF) may give, per line or per dot, kx and ky, one of them, or Xp, and a
+// transparent bit. The map is 4x4 planes of the parameter's plane size, or a bitmap; outside it
+// (PLSZ's screen-over) it repeats, shows one pattern (OVPNR), or is transparent.
+struct RotParam {
+    Nbg chr;                                    // characters, plane size, the map's pattern names
+    uint32_t plane[16];
+    int32_t xst, yst, zst, dxst, dyst, dx, dy, m[6], px, py, pz, cx, cy, cz, mx, my, kx, ky;
+    uint32_t ka0;                               // KTAOF and KAst, 10 fraction bits
+    int32_t dkast, dkax;
+    bool coef, coef1w;
+    int coef_mode, over;
+    uint16_t over_pn;
+    // on the current line
+    int32_t xsp, ysp, xp, yp, ldx, ldy;
+    uint32_t ka, line_coef;
+};
+
+struct Rbg {
+    bool on;
+    int mode;                                   // RPMD
+    bool crkte, perdot, bank_coef[4];
+    RotParam par[2];
+    uint8_t prio, ratio;
+    bool cc, offset, offset_b;
+};
+
+static int32_t sext(uint32_t v, int bits) { return (int32_t)(v << (32 - bits)) >> (32 - bits); }
+static uint32_t vl(uint32_t a) { return (uint32_t)vw(a) << 16 | vw(a + 2); }
+
+static void setup_rbg(Rbg& r) {
+    r = Rbg{};
+    uint16_t bgon = reg(0x20);
+    r.on = bgon >> 4 & 1;
+    if (!r.on) return;
+    r.mode = reg(0xB0) & 3;
+    uint16_t ramctl = reg(0x0E);
+    r.crkte = ramctl >> 15 & 1;
+    for (int b = 0; b < 4; ++b) {                // which VRAM banks hold coefficients (RDBS), split or not
+        int esb = b & (2 | (ramctl >> (8 + (b >> 1)) & 1));
+        r.bank_coef[b] = r.crkte || (ramctl >> (esb * 2) & 3) == 1;
+        r.perdot |= r.bank_coef[b];
+    }
+    r.prio = (uint8_t)(reg(0xFC) & 7);
+    r.ratio = (uint8_t)(reg(0x10C) & 0x1F);
+    r.cc = reg(0xEC) >> 4 & 1;
+    r.offset = reg(0x110) >> 4 & 1;
+    r.offset_b = reg(0x112) >> 4 & 1;
+    uint16_t chctl = (uint16_t)(reg(0x2A) >> 8), pncr = reg(0x38);
+    uint32_t rpta = ((uint32_t)(reg(0xBC) & 7) << 16 | (reg(0xBE) & 0xFFFE)) * 2 & 0xFFF7C;
+    for (int i = 0; i < 2; ++i) {
+        RotParam& p = r.par[i];
+        Nbg& s = p.chr;
+        s.on = true;
+        s.opaque = bgon >> 12 & 1;
+        s.colors = chctl >> 4 & 7;
+        s.bitmap = i == 0 && (chctl >> 1 & 1);
+        s.cell2x2 = chctl & 1;
+        s.bm_w = 512;
+        s.bm_h = chctl >> 2 & 1 ? 512 : 256;
+        s.bm_pal = (uint16_t)((reg(0x2E) & 7) << 4);
+        s.word1 = pncr >> 15 & 1;
+        s.cnsm = pncr >> 14 & 1;
+        s.supp = pncr & 0x3FF;
+        s.caos = (uint32_t)(reg(0xE6) & 7) << 8;
+        int plsz = reg(0x3A) >> (8 + i * 4) & 3;
+        s.plane_w = plsz == 0 ? 1 : 2;
+        s.plane_h = plsz == 3 ? 2 : 1;
+        s.page_bytes = (s.cell2x2 ? 0x800u : 0x2000u) * (s.word1 ? 1 : 2);
+        p.over = reg(0x3A) >> (10 + i * 4) & 3;
+        p.over_pn = reg(0xB8 + i * 2);
+        uint32_t mpof = reg(0x3E) >> (i * 4) & 7, mask = (uint32_t)(s.plane_w * s.plane_h - 1);
+        for (int k = 0; k < 16; ++k) {
+            uint32_t mp = reg(0x50 + i * 0x10 + (k / 2) * 2) >> ((k & 1) * 8) & 0x3F;
+            p.plane[k] = ((mpof << 6 | mp) & ~mask) * s.page_bytes;
+        }
+        s.bm_addr = mpof * 0x20000;
+        uint32_t a = rpta + (uint32_t)i * 0x80;
+        p.xst = sext(vl(a + 0x00) >> 6, 23);
+        p.yst = sext(vl(a + 0x04) >> 6, 23);
+        p.zst = sext(vl(a + 0x08) >> 6, 23);
+        p.dxst = sext(vl(a + 0x0C) >> 6, 13);
+        p.dyst = sext(vl(a + 0x10) >> 6, 13);
+        p.dx = sext(vl(a + 0x14) >> 6, 13);
+        p.dy = sext(vl(a + 0x18) >> 6, 13);
+        for (int k = 0; k < 6; ++k) p.m[k] = sext(vl(a + 0x1C + k * 4) >> 6, 14);
+        p.px = sext(vw(a + 0x34), 14); p.py = sext(vw(a + 0x36), 14); p.pz = sext(vw(a + 0x38), 14);
+        p.cx = sext(vw(a + 0x3C), 14); p.cy = sext(vw(a + 0x3E), 14); p.cz = sext(vw(a + 0x40), 14);
+        p.mx = sext(vl(a + 0x44) >> 6, 24);
+        p.my = sext(vl(a + 0x48) >> 6, 24);
+        p.kx = sext(vl(a + 0x4C), 24);
+        p.ky = sext(vl(a + 0x50), 24);
+        uint16_t ktctl = (uint16_t)(reg(0xB4) >> (i * 8));
+        p.coef = ktctl & 1;
+        p.coef1w = ktctl >> 1 & 1;
+        p.coef_mode = ktctl >> 2 & 3;
+        p.ka0 = ((uint32_t)(reg(0xB6) >> (i * 8) & 7) << 26) + (vl(a + 0x54) >> 6);
+        p.dkast = sext(vl(a + 0x58) >> 6, 20);
+        p.dkax = sext(vl(a + 0x5C) >> 6, 20);
+    }
+}
+
+// a coefficient's address (in words) from its table address (10 fraction bits)
+static uint32_t coef_addr(const Rbg& r, const RotParam& p, uint32_t ka) {
+    uint32_t a = (ka >> 10) << (p.coef1w ? 0 : 1);
+    return a & (r.crkte ? 0x3FFu : 0x3FFFFu);
+}
+
+// a coefficient: bit 31 transparent, bits 23-0 the value (7.16)
+static uint32_t coef_read(const Rbg& r, const RotParam& p, uint32_t addr) {
+    auto word = [&](uint32_t w) -> uint16_t {
+        if (!r.crkte) return vw(w * 2);
+        uint32_t b = (0x800 + w * 2) & 0xFFE;
+        return (uint16_t)(g_vdp2_cram[b] << 8 | g_vdp2_cram[b + 1]);
+    };
+    if (p.coef1w) {
+        uint16_t t = word(addr);
+        return ((uint32_t)sext((uint32_t)t << 6, 21) & 0xFFFFFF) | (uint32_t)(t & 0x8000) << 16;
+    }
+    return (uint32_t)word(addr) << 16 | word(addr + 1);
+}
+
+static void rbg_line(Rbg& r, int y) {
+    for (RotParam& p : r.par) {
+        int64_t x0 = p.xst + (int64_t)p.dxst * y - p.px * 1024, y0 = p.yst + (int64_t)p.dyst * y - p.py * 1024;
+        int64_t z0 = p.zst - p.pz * 1024;
+        p.xsp = (int32_t)((p.m[0] * x0 + p.m[1] * y0 + p.m[2] * z0) >> 10);
+        p.ysp = (int32_t)((p.m[3] * x0 + p.m[4] * y0 + p.m[5] * z0) >> 10);
+        p.xp = p.m[0] * (p.px - p.cx) + p.m[1] * (p.py - p.cy) + p.m[2] * (p.pz - p.cz) + p.cx * 1024 + p.mx;
+        p.yp = p.m[3] * (p.px - p.cx) + p.m[4] * (p.py - p.cy) + p.m[5] * (p.pz - p.cz) + p.cy * 1024 + p.my;
+        p.ldx = (p.m[0] * p.dx + p.m[1] * p.dy) >> 10;
+        p.ldy = (p.m[3] * p.dx + p.m[4] * p.dy) >> 10;
+        p.ka = p.ka0 + (uint32_t)(p.dkast * y);
+        p.line_coef = coef_read(r, p, coef_addr(r, p, p.ka));
+    }
+}
+
+static bool rbg_pixel(const Rbg& r, int x, Pix& out) {
+    int sel = r.mode == 1 ? 1 : 0;              // RPMD 3 (by the rotation-parameter window) is taken as A
+    auto coef_at = [&](int i) {
+        const RotParam& p = r.par[i];
+        if (!r.perdot) return p.line_coef;
+        uint32_t a = coef_addr(r, p, p.ka + (uint32_t)(x * p.dkax));
+        return r.bank_coef[r.crkte ? 0 : (a >> 16) & 3] ? coef_read(r, p, a) : 0u;
+    };
+    uint32_t c = 0;
+    if (r.mode == 2) {
+        c = r.par[0].coef ? coef_at(0) : 0;
+        if (c >> 31) { sel = 1; c = r.par[1].line_coef; }
+    } else if (r.par[sel].coef) {
+        c = coef_at(sel);
+    }
+    const RotParam& p = r.par[sel];
+    int32_t kx = p.kx, ky = p.ky;
+    uint32_t xp = (uint32_t)p.xp;
+    if (p.coef) {
+        if (c >> 31) return false;              // a transparent coefficient
+        int32_t v = sext(c, 24);
+        switch (p.coef_mode) {
+        case 0: kx = ky = v; break;
+        case 1: kx = v; break;
+        case 2: ky = v; break;
+        default: xp = (uint32_t)v << 2; break;
+        }
+    }
+    uint32_t ix = (xp + (uint32_t)(((int64_t)kx * (int32_t)(p.xsp + p.ldx * x)) >> 16)) >> 10;
+    uint32_t iy = ((uint32_t)p.yp + (uint32_t)(((int64_t)ky * (int32_t)(p.ysp + p.ldy * x)) >> 16)) >> 10;
+    const Nbg& s = p.chr;
+    uint32_t mw = s.bitmap ? (uint32_t)s.bm_w : (uint32_t)s.plane_w * 512 * 4;
+    uint32_t mh = s.bitmap ? (uint32_t)s.bm_h : (uint32_t)s.plane_h * 512 * 4;
+    bool outside = false;
+    if (p.over == 3) outside = (ix | iy) & ~511u;
+    else if (p.over) outside = (ix & ~(mw - 1)) || (iy & ~(mh - 1));
+    if (outside && (p.over & 2)) return false;
+    if (s.bitmap) return dot(s, s.bm_addr, (int)(ix & (mw - 1)), (int)(iy & (mh - 1)), s.bm_w, s.bm_pal, out);
+    return cell_pixel(s, p.plane, 4, ix & (mw - 1), iy & (mh - 1), out, outside ? &p.over_pn : nullptr);
 }
 
 // ---- the sprite layer -----------------------------------------------------------------------
@@ -321,6 +550,7 @@ static bool windowed(uint8_t ctl, int x, int y) {
 static uint8_t wctl_of(int layer) {
     switch (layer) {
     case L_SPRITE: return (uint8_t)(reg(0xD4) >> 8);
+    case L_RBG0: return (uint8_t)reg(0xD4);
     case L_NBG0: return (uint8_t)reg(0xD0);
     case L_NBG1: return (uint8_t)(reg(0xD0) >> 8);
     case L_NBG2: return (uint8_t)reg(0xD2);
@@ -334,8 +564,9 @@ static void note_unsupported() {
     auto once = [](int i, bool cond, const char* what, uint16_t v) {
         if (cond && !noted[i]) { noted[i] = true; sat_note("VDP2: %s (%04X) is not done", what, v); }
     };
-    once(0, reg(0x20) & 0x30, "RBG0/RBG1", reg(0x20));
-    once(1, reg(0x9A) & 0x3F3F, "line or vertical cell scroll (SCRCTL)", reg(0x9A));
+    once(0, (reg(0x20) & 0x20) || ((reg(0x20) & 0x10) && (reg(0xB0) & 3) == 3),
+         "RBG1, or rotation parameters chosen by window (BGON, RPMD)", reg(0x20));
+    once(1, reg(0x9A) & 0x0101, "vertical cell scroll (SCRCTL)", reg(0x9A));
     once(2, reg(0x22) & 0xF, "mosaic (MZCTL)", reg(0x22));
     once(3, ((reg(0xD0) | reg(0xD2) | reg(0xD4)) & 0x2020) || (reg(0xD6) & 0x2A2A),
          "the sprite window, or the rotation-parameter or colour-calculation window (WCTL)",
@@ -364,20 +595,51 @@ void vdp2_compose(Frame& f) {
     f.px.assign((size_t)f.w * f.h, 0);
     if (!(tvmd & 0x8000)) return;                // display off
     note_unsupported();
-    Nbg nbg[4];
-    for (int n = 0; n < 4; ++n) setup_nbg(n, nbg[n]);
-    setup_windows();
+    // a debugging aid: SATURNKIT_VDP2_HIDE=MASK leaves out layers (1 sprite, 2 RBG0, 4-32 NBG0-NBG3)
+    static const unsigned hide = [] { const char* e = std::getenv("SATURNKIT_VDP2_HIDE"); return e ? (unsigned)std::strtoul(e, nullptr, 0) : 0u; }();
+    static Nbg nbg[4];
+    static Rbg rbg;
     uint8_t wctl[L_COUNT];
-    for (int i = 0; i < L_COUNT; ++i) wctl[i] = wctl_of(i) & 0x8F;    // W0, W1, the logic
-    const uint16_t* fb = vdp1_display();
-    uint32_t bk = ((uint32_t)(reg(0xAC) & 7) << 16 | reg(0xAE)) * 2;
-    bool bk_lines = reg(0xAC) & 0x8000;
-    bool add = reg(0xEC) >> 8 & 1;
+    uint32_t bk = 0;
+    bool bk_lines = false, add = false;
     Pix back{};
-    back.offset = reg(0x110) >> 5 & 1;
-    back.offset_b = reg(0x112) >> 5 & 1;
+    auto setup = [&] {
+        for (int n = 0; n < 4; ++n) setup_nbg(n, nbg[n]);
+        setup_rbg(rbg);
+        setup_windows();
+        for (int i = 0; i < L_COUNT; ++i) wctl[i] = wctl_of(i) & 0x8F;    // W0, W1, the logic
+        bk = ((uint32_t)(reg(0xAC) & 7) << 16 | reg(0xAE)) * 2;
+        bk_lines = reg(0xAC) & 0x8000;
+        add = reg(0xEC) >> 8 & 1;
+        back.offset = reg(0x110) >> 5 & 1;
+        back.offset_b = reg(0x112) >> 5 & 1;
+    };
+    setup();
+    // Raster effects: each line sees the registers as the HBlank handlers left them by then
+    // (those they never wrote as the field ends; those they wrote as the field began, until
+    // the line of their first write).
+    const std::vector<RasterWrite>& raster = video_raster_writes();
+    uint8_t end_regs[0x200], cur[0x200];
+    size_t next_write = 0;
+    if (!raster.empty()) {
+        std::memcpy(end_regs, g_vdp2_regs, sizeof end_regs);
+        std::memcpy(cur, g_vdp2_regs, sizeof cur);
+        const uint8_t* start = video_field_regs();
+        for (const RasterWrite& w : raster)
+            for (int b = 0; b < w.size; ++b) cur[(w.off + b) & 0x1FF] = start[(w.off + b) & 0x1FF];
+    }
+    const uint16_t* fb = vdp1_display();
     for (int y = 0; y < f.h; ++y) {
+        if (!raster.empty()) {
+            bool changed = y == 0;
+            for (; next_write < raster.size() && raster[next_write].line <= y; ++next_write, changed = true) {
+                const RasterWrite& w = raster[next_write];
+                for (int b = 0; b < w.size; ++b) cur[(w.off + b) & 0x1FF] = (uint8_t)(w.value >> (8 * (w.size - 1 - b)));
+            }
+            if (changed) { std::memcpy(g_vdp2_regs, cur, sizeof cur); setup(); }
+        }
         back.rgb = rgb555(vw(bk + (bk_lines ? (uint32_t)y * 2 : 0)));
+        if (rbg.on) rbg_line(rbg, y);
         for (int x = 0; x < f.w; ++x) {
             Pix l[L_COUNT];
             int top = -1, second = -1;
@@ -386,15 +648,21 @@ void vdp2_compose(Frame& f) {
                 if (top < 0 || l[i].prio > l[top].prio) { second = top; top = i; }
                 else if (second < 0 || l[i].prio > l[second].prio) second = i;
             };
-            // in the order that wins ties: sprite, then NBG0..NBG3
+            // in the order that wins ties: sprite, RBG0, then NBG0..NBG3
             l[L_SPRITE] = {};
-            if (!(wctl[L_SPRITE] && windowed(wctl[L_SPRITE], x, y)) && sprite_pixel(fb[y * 512 + x], l[L_SPRITE]))
+            if (!(hide & 1) && !(wctl[L_SPRITE] && windowed(wctl[L_SPRITE], x, y)) && sprite_pixel(fb[y * 512 + x], l[L_SPRITE]))
                 consider(L_SPRITE);
+            Pix& rp = l[L_RBG0];
+            rp = {};
+            if (rbg.on && rbg.prio && !(hide & 2) && !(wctl[L_RBG0] && windowed(wctl[L_RBG0], x, y)) && rbg_pixel(rbg, x, rp)) {
+                rp.prio = rbg.prio; rp.ratio = rbg.ratio; rp.cc = rbg.cc; rp.offset = rbg.offset; rp.offset_b = rbg.offset_b;
+                consider(L_RBG0);
+            }
             for (int n = 0; n < 4; ++n) {
                 Pix& p = l[L_NBG0 + n];
                 p = {};
                 const Nbg& s = nbg[n];
-                if (!s.on || !s.prio) continue;
+                if (!s.on || !s.prio || (hide >> (2 + n) & 1)) continue;
                 if (wctl[L_NBG0 + n] && windowed(wctl[L_NBG0 + n], x, y)) continue;
                 if (!nbg_pixel(s, x, y, p)) continue;
                 p.prio = s.prio; p.ratio = s.ratio; p.cc = s.cc; p.offset = s.offset; p.offset_b = s.offset_b;
@@ -416,4 +684,5 @@ void vdp2_compose(Frame& f) {
             f.px[(size_t)y * f.w + x] = rgb;
         }
     }
+    if (!raster.empty()) std::memcpy(g_vdp2_regs, end_regs, sizeof end_regs);
 }

@@ -31,6 +31,11 @@ struct Frame {
     std::vector<uint32_t> px;                       // 0x00RRGGBB, w*h, top row first
 };
 void vdp2_compose(Frame& out);                       // the picture of the field that has just ended
+// Raster effects: VDP2 register writes an HBlank-IN handler made during the field, each with
+// the line it was made on (it shows from that line on), and the registers as the field began.
+struct RasterWrite { int line; uint16_t off; uint8_t size; uint32_t value; };
+const std::vector<RasterWrite>& video_raster_writes();
+const uint8_t* video_field_regs();                   // VDP2's registers at the field's line 0
 int vdp2_lines();                                    // 224, 240 or 256 (TVMD VRESO)
 
 // ---- the host (host.cpp) ------------------------------------------------------------------

@@ -296,6 +296,25 @@ void master_poll_devices() {
     if (g_cfg.stop_vblanks && sat_vblanks() >= g_cfg.stop_vblanks) sat_stop("VBlank limit");
 }
 
+// Virtual time passes to `until` on the master, and the interrupts are taken. While the
+// SCU lets HBlank-IN through, one raster line at a time: each line's HBlank is taken
+// before the next line starts, as a handler that changes VDP2 a line at a time needs
+// (otherwise a poll spans more than a line, and HBlanks raised twice are taken once).
+static bool advance(SH2Context& c, uint64_t until) {
+    if (scu_mask() >> IRQ_HBLANK_IN & 1) {
+        g_vtime = until;
+        master_poll_devices();
+        return scu_deliver(c);
+    }
+    bool any = false;
+    while (g_vtime < until) {
+        g_vtime = std::min(until, video_next_line(g_vtime));
+        master_poll_devices();
+        any |= scu_deliver(c);
+    }
+    return any;
+}
+
 void sh2_poll(SH2Context& c) {
     c.budget = kBudget;
     if (c.cpu == 1) {
@@ -303,13 +322,17 @@ void sh2_poll(SH2Context& c) {
         return;
     }
     g_poll_ring[g_poll_pos++ % 4096] = __builtin_return_address(0);
-    g_vtime += kBudget * kNsPerSafePoint;
-    master_poll_devices();
-    scu_deliver(c);
+    advance(c, g_vtime + kBudget * kNsPerSafePoint);
 }
+
+static int g_irq_active = -1;
+
+int sat_interrupt_active() { return g_irq_active; }
 
 void sat_interrupt(SH2Context& c, uint32_t vec, uint32_t level) {
     ++g_ints[vec & 0x7F];
+    int outer = g_irq_active;
+    g_irq_active = c.cpu == 0 ? (int)vec : outer;
     SH2Context saved = c;
     uint32_t target = ld32(c.vbr + vec * 4);
     c.r[15] -= 4; st32(c.r[15], sh2_get_sr(c));
@@ -325,15 +348,13 @@ void sat_interrupt(SH2Context& c, uint32_t vec, uint32_t level) {
     int32_t budget = c.budget;
     c = saved;
     c.budget = budget;
+    g_irq_active = outer;
 }
 
 void sh2_sleep(SH2Context& c, uint32_t pc) {
     // wait for an interrupt: time passes until one is taken
-    for (int i = 0; i < 100000; ++i) {
-        g_vtime += kBudget * kNsPerSafePoint;
-        master_poll_devices();
-        if (scu_deliver(c)) return;
-    }
+    for (int i = 0; i < 100000; ++i)
+        if (advance(c, g_vtime + kBudget * kNsPerSafePoint)) return;
     sat_fatal("sleep at %08X: nothing woke it", pc);
 }
 

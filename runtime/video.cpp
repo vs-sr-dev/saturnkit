@@ -10,7 +10,10 @@
 // file wants it; at VBlank-OUT VDP1 erases and changes frame (vdp1.cpp).
 //
 // VDP1 is vdp1.cpp, VDP2's picture vdp2.cpp; VDP2's registers, VRAM and
-// colour RAM keep what is written.
+// colour RAM keep what is written. A write to VDP2's registers from an
+// HBlank-IN handler is also kept with its line, for the field's picture to
+// change from that line on (a raster effect); the registers as line 0
+// began are kept for the lines before it.
 #include "saturn.h"
 #include "video.h"
 #include <algorithm>
@@ -23,6 +26,11 @@ static const int kLines = 263;
 static uint64_t g_line_abs;                      // raster lines since power-on
 static uint64_t g_vblanks;
 static Frame g_frame;
+static std::vector<RasterWrite> g_raster;
+static uint8_t g_field_regs[0x200];
+
+const std::vector<RasterWrite>& video_raster_writes() { return g_raster; }
+const uint8_t* video_field_regs() { return g_field_regs; }
 
 uint64_t sat_vblanks() { return g_vblanks; }
 uint64_t video_frame_changes() { return vdp1_frame_changes(); }
@@ -83,12 +91,21 @@ static void vblank_in(uint64_t now) {
     host_pace(now);
 }
 
+uint64_t video_next_line(uint64_t now) {
+    const uint64_t line_ns = kFrameNs / kLines;
+    return (now / line_ns + 1) * line_ns;
+}
+
 void video_tick(uint64_t now) {
     uint64_t target = now / (kFrameNs / kLines);
     while (g_line_abs < target) {
         ++g_line_abs;
         int line = (int)(g_line_abs % kLines);
-        if (line == 0) { vdp1_vblank_out(); scu_raise(IRQ_VBLANK_OUT); scu_frame_event(1); }
+        if (line == 0) {
+            g_raster.clear();
+            std::copy(g_vdp2_regs, g_vdp2_regs + 0x200, g_field_regs);
+            vdp1_vblank_out(); scu_raise(IRQ_VBLANK_OUT); scu_frame_event(1);
+        }
         if (line == display_lines()) vblank_in(g_line_abs * (kFrameNs / kLines));
         scu_raise(IRQ_HBLANK_IN);
         scu_line(line);
@@ -136,4 +153,6 @@ void video_write(uint32_t a, uint32_t v, int size) {
     if (a < 0x05D00000u) { vdp1_fb_write(a & 0x3FFFF, v, size); return; }
     if (a < 0x05D00020u) { vdp1_reg_write(a & 0x1F, v, size); return; }
     mem_wr(g_vdp2_regs, a & 0x1FF, v, size);
+    if (sat_interrupt_active() == 0x40 + IRQ_HBLANK_IN && g_raster.size() < 65536)
+        g_raster.push_back({(int)(g_line_abs % kLines), (uint16_t)(a & 0x1FF), (uint8_t)size, v});
 }

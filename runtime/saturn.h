@@ -56,6 +56,7 @@ void sat_note(const char* fmt, ...) __attribute__((format(printf, 1, 2)));   // 
 [[noreturn]] void sat_fatal(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 [[noreturn]] void sat_stop(const char* why);                  // ends the run cleanly
 void sat_interrupt(SH2Context& c, uint32_t vec, uint32_t level);   // take it now (a safe point)
+int  sat_interrupt_active();        // the vector whose handler the master runs (innermost), or -1
 void slave_on();                    // SMPC SSHON: the slave boots
 void slave_off();                   // SSHOFF: held in reset
 void slave_idle_check(uint32_t ftcsr);   // the slave read its FTCSR: yield if nothing is there
@@ -127,6 +128,7 @@ void onchip_reset(int cpu);
 // ---- video (video.cpp; vdp1.cpp, vdp2.cpp, host.cpp through video.h) --------------------------
 void video_init();
 void video_tick(uint64_t now);        // raster timing: VBlank in/out, lines, VDP1 frames
+uint64_t video_next_line(uint64_t now);   // the time the next raster line starts
 uint32_t video_read(uint32_t a, int size);    // VDP1, VDP2, SCSP (canonical addresses)
 void video_write(uint32_t a, uint32_t v, int size);
 bool video_owns(uint32_t a);
