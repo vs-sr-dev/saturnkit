@@ -2,6 +2,7 @@
 
     python -m saturnkit.recomp --out build/recomp NAME=FILE@BASE[+SEED,...] ... [--optest]
                                [--per-file 8000] [--no-comments] [--hook NAME:ADDR,...]
+                               [--overlay NAME,...]
 
 Each program is discovered (recomp/discover.py) and emitted into its own
 namespace, p_<name>. Programs loaded at the same address are separate
@@ -20,6 +21,11 @@ modules; the runtime activates the one whose image it finds in memory
 in program NAME (not a branch, not a delay slot): a place where the
 runtime can change what the game computed (runtime/core.cpp, `--hook` of
 the saturn executable).
+
+--overlay NAME,... marks those programs as overlays: a call to their base
+is an ordinary call that returns to its caller (a resident program that
+loads them one after another at one address and calls each), not a
+program start that resets the stack (runtime/core.cpp, sh2_call).
 
 --optest adds saturnkit's own instruction test (recomp/selftest.py): a
 synthetic program with every SH-2 instruction form, as module OPTEST, and
@@ -106,8 +112,8 @@ def volatile_literals(prog):
 
 
 class Module:
-    def __init__(self, name, path, base, seeds=(), hooks=()):
-        self.name, self.path, self.base = name, path, base
+    def __init__(self, name, path, base, seeds=(), hooks=(), overlay=False):
+        self.name, self.path, self.base, self.overlay = name, path, base, overlay
         self.hooks = frozenset(hooks)
         self.ns = "p_" + name.lower()
         self.data = open(path, "rb").read()
@@ -161,8 +167,9 @@ class Module:
             for e in self.entries:
                 f.write("    {0x%08Xu, %s},\n" % (e, E.fname(e)))
             f.write("};\n\n")
-            f.write('extern const SH2Module module = {"%s", 0x%08Xu, %du, 0x%08Xu, funcs, %d};\n'
-                    % (self.name, self.base, len(self.data), self.crc, len(self.entries)))
+            f.write('extern const SH2Module module = {"%s", 0x%08Xu, %du, 0x%08Xu, funcs, %d, %s};\n'
+                    % (self.name, self.base, len(self.data), self.crc, len(self.entries),
+                       "SH2_MODULE_OVERLAY" if self.overlay else "0"))
             f.write("\n}  // namespace %s\n" % self.ns)
         self.files.append(self.ns + "_table.cpp")
 
@@ -219,9 +226,13 @@ endif()
 """
 
 
-def generate(specs, out, per_file=8000, comments=True, optest=False, log=print, hooks=None):
-    """hooks: {program name: [address, ...]}, see --hook."""
+def generate(specs, out, per_file=8000, comments=True, optest=False, log=print, hooks=None, overlays=()):
+    """hooks: {program name: [address, ...]}, see --hook; overlays: program names, see --overlay."""
     hooks = hooks or {}
+    overlays = set(overlays)
+    unknown = overlays - {s[0] for s in specs}
+    if unknown:
+        raise SystemExit("--overlay %s: no such program" % ", ".join(sorted(unknown)))
     t0 = time.time()
     os.makedirs(out, exist_ok=True)
     if optest:
@@ -231,7 +242,7 @@ def generate(specs, out, per_file=8000, comments=True, optest=False, log=print, 
     modules = []
     for name, path, base, seeds in specs:
         t = time.time()
-        m = Module(name, path, base, seeds, hooks.get(name, ()))
+        m = Module(name, path, base, seeds, hooks.get(name, ()), name in overlays)
         m.generate(out, per_file, comments, log)
         missing = m.hooks - {a for f in m.prog.funcs.values() for a in f.code}
         if missing:
@@ -286,12 +297,15 @@ def main(argv=None):
     ap.add_argument("--no-comments", action="store_true")
     ap.add_argument("--optest", action="store_true", help="add saturnkit's instruction test module")
     ap.add_argument("--hook", action="append", default=[], help="NAME:ADDR,...: sh2_hook after these instructions")
+    ap.add_argument("--overlay", action="append", default=[], help="NAME,...: programs called at their base, that return")
     a = ap.parse_args(argv)
     hooks = {}
     for h in a.hook:
         name, _, addrs = h.partition(":")
         hooks.setdefault(name, []).extend(int(x, 16) for x in addrs.split(",") if x)
-    generate([parse_spec(s) for s in a.programs], a.out, a.per_file, not a.no_comments, a.optest, hooks=hooks)
+    overlays = [n for o in a.overlay for n in o.split(",") if n]
+    generate([parse_spec(s) for s in a.programs], a.out, a.per_file, not a.no_comments, a.optest, hooks=hooks,
+             overlays=overlays)
 
 
 if __name__ == "__main__":

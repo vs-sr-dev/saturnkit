@@ -57,6 +57,7 @@ struct SlaveReset {};
 static uint64_t g_vtime;                        // virtual ns
 static std::chrono::steady_clock::time_point g_t0;
 static int g_starts;
+static int g_overlays;
 
 uint64_t sat_now() {
     if (g_cfg.realtime)
@@ -362,6 +363,18 @@ void sh2_program_start(SH2Context& c, uint32_t addr) {
     throw ProgramStart{addr};
 }
 
+void sh2_overlay_call(SH2Context& c, uint32_t addr, const SH2Module* m) {
+    if (!m) {
+        uint8_t img[0x100];
+        sh2_mem_read(addr, img, sizeof img);
+        sat_fatal("call to the overlay base %08X: no module matches the image there (crc32 of its first 256 bytes "
+                  "%08X, from pr %08X)", addr, sh2_crc32(img, sizeof img), c.pr);
+    }
+    sh2_activate(m);
+    ++g_overlays;
+    sat_note("overlay %d: %s at %08X (from pr %08X)", g_overlays, m->name, addr, c.pr);
+}
+
 int saturn_main(const SaturnConfig& cfg) {
     g_cfg = cfg;
     g_t0 = std::chrono::steady_clock::now();
@@ -399,8 +412,8 @@ int saturn_main(const SaturnConfig& cfg) {
             break;
         }
     }
-    sat_note("stopped (%s) after %llu VBlanks, %.3f s, %d program starts, %llu VDP1 frame changes, %llu draws",
-             g_stop_why ? g_stop_why : "?", (unsigned long long)sat_vblanks(), sat_now() / 1e9, g_starts,
+    sat_note("stopped (%s) after %llu VBlanks, %.3f s, %d program starts, %d overlay calls, %llu VDP1 frame changes, %llu draws",
+             g_stop_why ? g_stop_why : "?", (unsigned long long)sat_vblanks(), sat_now() / 1e9, g_starts, g_overlays,
              (unsigned long long)video_frame_changes(), (unsigned long long)video_draws());
     report_ints();
     std::fprintf(stderr, "  master pr %08X, sr %03X\n", g_master.pr, sh2_get_sr(g_master));

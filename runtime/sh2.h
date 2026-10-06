@@ -36,7 +36,11 @@ struct SH2Module {
     uint32_t base, size, crc;           // crc32 of the image as loaded at base
     const SH2FuncEntry* funcs;
     uint32_t nfuncs;
+    uint32_t flags;                     // SH2_MODULE_*
 };
+// An overlay is called at its base as a function and returns to its caller;
+// a call to any other module's base is a program start (sh2_program_start).
+enum { SH2_MODULE_OVERLAY = 1 };
 
 // ---- services provided by the runtime ---------------------------------------------
 extern uint8_t g_wram_l[];              // 0x00200000, 1 MiB
@@ -188,6 +192,8 @@ void    sh2_activate(const SH2Module* m);          // replaces any active module
 SH2Func sh2_lookup(uint32_t addr);                  // nullptr if not an entry of an active module
 void    sh2_call_unknown(SH2Context& c, uint32_t addr);   // services: not an entry (the BIOS...)
 void    sh2_program_start(SH2Context& c, uint32_t addr);  // services: a call to a module's base
+void    sh2_overlay_call(SH2Context& c, uint32_t addr, const SH2Module* m);   // services: a call to an
+                                                    // overlay's base, m the image found there (or nullptr)
 uint32_t sh2_crc32(const uint8_t* p, size_t n, uint32_t crc = 0);
 // Guest memory as bytes, for loaders and tests (work RAMs only).
 bool sh2_mem_write(uint32_t addr, const void* src, size_t n);

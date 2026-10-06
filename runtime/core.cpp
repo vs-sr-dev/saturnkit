@@ -132,26 +132,35 @@ SH2Func sh2_lookup(uint32_t addr) {
 // A call to a module's base address is a program start: on the Saturn the
 // 1st read address, where a crt0 resets the stack. The services decide what
 // that means (the game's runtime unwinds the host stack, the tests just call).
-static bool is_base(uint32_t addr) {
+// A call to an overlay's base is an ordinary call into the overlay found
+// there: the services activate it, then it runs and returns to its caller.
+// is_base: 0 not a base, 1 a program's, 2 an overlay's (some module there is one).
+static int is_base(uint32_t addr) {
     static uint32_t bases[kSlots * 2];
+    static int kinds[kSlots * 2];
     static int n = -1;
     if (n < 0) {
         n = 0;
         for (int i = 0; i < g_sh2_nmodules; ++i) {
-            uint32_t b = g_sh2_modules[i]->base;
-            bool seen = false;
-            for (int k = 0; k < n; ++k) seen |= bases[k] == b;
-            if (!seen && n < kSlots * 2) bases[n++] = b;
+            const SH2Module* m = g_sh2_modules[i];
+            int kind = m->flags & SH2_MODULE_OVERLAY ? 2 : 1, k = 0;
+            while (k < n && bases[k] != m->base) ++k;
+            if (k < n) { if (kind == 2) kinds[k] = 2; }
+            else if (n < kSlots * 2) { bases[n] = m->base; kinds[n++] = kind; }
         }
     }
     for (int k = 0; k < n; ++k)
-        if (bases[k] == addr) return true;
-    return false;
+        if (bases[k] == addr) return kinds[k];
+    return 0;
 }
 
 void sh2_call(SH2Context& c, uint32_t addr) {
     if (addr >> 29 == 1) addr &= 0x1FFFFFFFu;
-    if (SH2_UNLIKELY(is_base(addr))) { sh2_program_start(c, addr); return; }
+    if (int kind = is_base(addr); SH2_UNLIKELY(kind)) {
+        const SH2Module* m = kind == 2 ? sh2_identify(addr) : nullptr;
+        if (kind == 1 || (m && !(m->flags & SH2_MODULE_OVERLAY))) { sh2_program_start(c, addr); return; }
+        sh2_overlay_call(c, addr, m);
+    }
     if (SH2Func f = sh2_lookup(addr)) f(c);
     else sh2_call_unknown(c, addr);
 }

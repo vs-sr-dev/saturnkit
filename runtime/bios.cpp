@@ -91,7 +91,13 @@ void bios_boot() {
 
     SH2Context& c = g_master;
     c.vbr = 0x06000000u;
-    c.imask = 15;
+    // The 1st read is entered with the CPU's interrupts open: on the Saturn the
+    // IP.BIN's initial program (run by the BIOS, not here) installs VBlank
+    // handlers, waits on a counter the VBlank-in handler counts (level 15, so
+    // the mask is below it), masks VBlank at the SCU again and calls the 1st
+    // read with SR as it was. The SCU's mask stays all set, so nothing is
+    // taken until the game unmasks a source.
+    c.imask = 0;
     c.r[15] = mstack ? mstack : 0x06002000u;
     (void)sstack;
 }

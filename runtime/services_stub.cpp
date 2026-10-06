@@ -29,6 +29,10 @@ void sh2_program_start(SH2Context& c, uint32_t addr) {
     if (SH2Func f = sh2_lookup(addr)) f(c);
     else fail(c, "program start with no module at", addr);
 }
+void sh2_overlay_call(SH2Context& c, uint32_t addr, const SH2Module* m) {
+    if (!m) fail(c, "call to an overlay base with no module at", addr);
+    sh2_activate(m);
+}
 
 uint32_t sh2_mmio_read(uint32_t a, int size) {
     std::fprintf(stderr, "saturnkit: %d-byte read of %08X (no hardware)\n", size, a);
