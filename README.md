@@ -23,6 +23,7 @@ fixes live in the ports.
 | [pc-virtualhydlide](https://github.com/vs-sr-dev/pc-virtualhydlide) | Virtual Hydlide (1995) | the disc, the SH-2 decoder, the address map, function discovery, cross-program matching, the interpreter, the recompiler, the runtime core (HLE boot and BIOS, SCU, SMPC, the slave as a coroutine, the CD block), VDP1 and VDP2 in software in a window with the pad, the 68000 and the SCSP (sound), recompiler hooks for a game layer, and the fields between a game's frames drawn moving (`--interp`) |
 | [pc-deepfear](https://github.com/vs-sr-dev/pc-deepfear) | Deep Fear (1998) | function discovery for GCC and SGL code (GCC's switches, `mova` tables and pointers, tables of records, computed jumps into unrolled code, SGL's hand-written handlers), the SCU DSP (a disassembler, and an interpreter in the runtime), `SYS_CHGUIPR` and the per-interrupt SCU masks, literal-pool slots that the code writes, GFS_SGL's streams on the CD block (Play's modes and a pickup kept where it reads), the division unit's shadow registers, the DMAC's 16-byte transfers, `--dump` with VDP2's registers, VDP2's windows, the drive at its real 2x with seek times |
 | [pc-xjapan](https://github.com/vs-sr-dev/pc-xjapan) | X JAPAN Virtual Shock 001 (1995) | a file system over a Mode 1 and a CD-ROM XA track, interleaved files and records of CD-DA tracks, function discovery through far jumps and callbacks that do nothing, TVSTAT's HBLANK, the pad read directly through the SMPC's ports, the disc's area code, a game played in the window recorded and given back headless (`--record-input`, `--input @FILE`) |
+| [pc-albertodyssey](https://github.com/vs-sr-dev/pc-albertodyssey) | Albert Odyssey: Legend of Eldean (1997) | overlays called at one address and returned from (`--overlay`), the 1st read entered with interrupts open, discovery's short pointer-table entries, CD-DA music played through the CD block, VDP2's rotation screen RBG0 with coefficient tables, NBG line scroll, raster effects from an HBlank handler, the special priority and colour calculation, VDP1 stopping at a command it does not know |
 
 ## Using it
 
@@ -147,5 +148,5 @@ Musashi (the 68000, MIT) with SoftFloat, and its SCSP is in part derived
 from MAME's (BSD-3-Clause): their terms are in
 [THIRD_PARTY.md](THIRD_PARTY.md).
 
-saturnkit has been proven on three games so far (the ports table above); its interfaces will
+saturnkit has been proven on four games so far (the ports table above); its interfaces will
 still change as the next one asks things of it.
