@@ -10,16 +10,17 @@
 // or per dot in VRAM or colour RAM, cells or bitmap, screen-over);
 // the sprite layer from VDP1's framebuffer, every sprite type, palette and
 // RGB mixed (SPCLMD), with its priorities and colour-calculation ratios;
-// priorities with the chip's order for ties (sprite, NBG0, NBG1, NBG2,
-// NBG3); colour calculation of the top two layers (ratio of the top one, or
+// priorities with the chip's order for ties (sprite, RBG0, NBG0, NBG1, NBG2,
+// NBG3), and the special priority and special colour calculation (SFPRMD,
+// SFCCMD: per character, per dot by the special function codes, by the
+// colour's MSB); colour calculation of the top two layers (ratio of the top one, or
 // add); the colour offsets A and B; the back screen (one colour or one a
 // line); windows 0 and 1 (rectangles or line tables, inside or outside, OR
 // or AND) on NBG0-NBG3 and the sprite layer; the display bit. What is not:
 // RBG1, rotation parameters chosen by window, the coefficients' line colour,
 // vertical-cell scroll, mosaic, the
 // sprite window and the colour-calculation and rotation-parameter windows,
-// the line colour screen, special
-// priority and special colour calculation, shadows on VDP2's layers,
+// the line colour screen, shadows on VDP2's layers,
 // gradation, extended colour calculation, high and exclusive resolutions.
 // A register that asks for one of them is noted once.
 #include "saturn.h"
@@ -70,6 +71,10 @@ struct Pix {
     bool cc;                                    // colour calculation on
     bool offset;                                // colour offset on
     bool offset_b;                              // ... offset B rather than A
+    // for the special priority and colour calculation (SFPRMD, SFCCMD): the pattern name's
+    // (or the bitmap's) special bits, the dot's colour code and colour RAM MSB, RGB or not
+    bool spr, scc, msb, direct;
+    uint16_t dcc;
 };
 
 enum { L_SPRITE, L_RBG0, L_NBG0, L_NBG1, L_NBG2, L_NBG3, L_COUNT };
@@ -89,6 +94,7 @@ struct Nbg {
     int32_t sx, sy, dx, dy;                     // scroll and increments, 8 fraction bits
     uint8_t prio, ratio;
     bool cc, offset, offset_b;
+    bool bm_spr, bm_scc;                        // a bitmap's special priority and colour bits
     bool line;                                  // NBG0/NBG1's line scroll: each line's X scroll,
     int32_t lx[256], ly[256], ldx[256];         // Y coordinate and X increment
 };
@@ -160,6 +166,8 @@ static void setup_nbg(int n, Nbg& s) {
         s.bm_addr = mpof * 0x20000;
         uint16_t bmpn = (uint16_t)(reg(0x2C) >> sh);
         s.bm_pal = (uint16_t)((bmpn & 7) << 4);
+        s.bm_spr = bmpn >> 5 & 1;
+        s.bm_scc = bmpn >> 4 & 1;
     }
     int caos_sh = n * 4;
     s.caos = (uint32_t)(reg(0xE4) >> caos_sh & 7) << 8;
@@ -197,18 +205,21 @@ static bool dot(const Nbg& s, uint32_t base, int x, int y, int width, uint32_t p
         uint16_t w = vw(base + i * 2);
         if (!(w & 0x8000) && !s.opaque) return false;
         p.rgb = rgb555(w);
+        p.direct = true; p.msb = w >> 15;
         return true;
     }
     default: {
         uint32_t w = (uint32_t)vw(base + i * 4) << 16 | vw(base + i * 4 + 2);
         if (!(w & 0x80000000u) && !s.opaque) return false;
         p.rgb = (w & 0xFF) << 16 | (w & 0xFF00) | (w >> 16 & 0xFF);
+        p.direct = true; p.msb = w >> 31;
         return true;
     }
     }
     if (v == 0 && !s.opaque) return false;
     uint32_t index = s.colors == 0 ? pal * 16 + v : s.colors == 1 ? (pal & 0x70) * 16 + v : v;
-    p.rgb = cram(index + s.caos, nullptr);
+    p.rgb = cram(index + s.caos, &p.msb);
+    p.direct = false; p.dcc = (uint16_t)v;
     return true;
 }
 
@@ -232,6 +243,7 @@ static bool cell_pixel(const Nbg& s, const uint32_t* planes, int side, uint32_t 
     bool hf, vf;
     if (s.word1 || pnd_over) {
         uint16_t w = pnd_over ? *pnd_over : vw(pnd_addr);
+        p.spr = s.supp >> 9 & 1; p.scc = s.supp >> 8 & 1;
         pal = s.colors == 0 ? (uint32_t)(w >> 12 & 0xF) | (s.supp >> 1 & 0x70) : (uint32_t)(w >> 8 & 0x70);
         if (!s.cnsm) {
             hf = w & 0x400; vf = w & 0x800;
@@ -245,6 +257,7 @@ static bool cell_pixel(const Nbg& s, const uint32_t* planes, int side, uint32_t 
     } else {
         uint16_t w0 = vw(pnd_addr), w1 = vw(pnd_addr + 2);
         hf = w0 & 0x4000; vf = w0 & 0x8000;
+        p.spr = w0 >> 13 & 1; p.scc = w0 >> 12 & 1;
         pal = w0 & 0x7F;
         chr = w1 & 0x7FFF;
     }
@@ -264,6 +277,7 @@ static bool nbg_pixel(const Nbg& s, int x, int y, Pix& p) {
     if (s.bitmap) {
         sx &= (uint32_t)s.bm_w - 1;
         sy &= (uint32_t)s.bm_h - 1;
+        p.spr = s.bm_spr; p.scc = s.bm_scc;
         return dot(s, s.bm_addr, (int)sx, (int)sy, s.bm_w, s.bm_pal, p);
     }
     uint32_t pw = (uint32_t)s.plane_w * 512, ph = (uint32_t)s.plane_h * 512;
@@ -335,6 +349,8 @@ static void setup_rbg(Rbg& r) {
         s.bm_w = 512;
         s.bm_h = chctl >> 2 & 1 ? 512 : 256;
         s.bm_pal = (uint16_t)((reg(0x2E) & 7) << 4);
+        s.bm_spr = reg(0x2E) >> 5 & 1;
+        s.bm_scc = reg(0x2E) >> 4 & 1;
         s.word1 = pncr >> 15 & 1;
         s.cnsm = pncr >> 14 & 1;
         s.supp = pncr & 0x3FF;
@@ -448,7 +464,10 @@ static bool rbg_pixel(const Rbg& r, int x, Pix& out) {
     if (p.over == 3) outside = (ix | iy) & ~511u;
     else if (p.over) outside = (ix & ~(mw - 1)) || (iy & ~(mh - 1));
     if (outside && (p.over & 2)) return false;
-    if (s.bitmap) return dot(s, s.bm_addr, (int)(ix & (mw - 1)), (int)(iy & (mh - 1)), s.bm_w, s.bm_pal, out);
+    if (s.bitmap) {
+        out.spr = s.bm_spr; out.scc = s.bm_scc;
+        return dot(s, s.bm_addr, (int)(ix & (mw - 1)), (int)(iy & (mh - 1)), s.bm_w, s.bm_pal, out);
+    }
     return cell_pixel(s, p.plane, 4, ix & (mw - 1), iy & (mh - 1), out, outside ? &p.over_pn : nullptr);
 }
 
@@ -574,7 +593,34 @@ static void note_unsupported() {
     once(4, reg(0xE2) & 0x13F, "shadows on VDP2's layers (SDCTL)", reg(0xE2));
     once(5, reg(0xEC) & 0x8600 && reg(0xEC) & 0x5F, "extended colour calculation or gradation (CCCTL)", reg(0xEC));
     once(6, (reg(0x00) & 7) >= 2, "a high or exclusive resolution (TVMD)", reg(0x00));
-    once(7, (reg(0xE8) & 0x0F) || reg(0xEA) || reg(0xEE), "special priority, line colour or special colour calculation", reg(0xE8));
+    once(7, reg(0xE8) & 0x3F, "the line colour screen (LNCLEN)", reg(0xE8));
+}
+
+// ---- the special functions ------------------------------------------------------------------
+// layer: 0-3 NBG0-NBG3, 4 RBG0 (two bits each in SFPRMD and SFCCMD, one in SFSEL)
+// SFPRMD: 0 the screen's priority; 1 its LSB from the character's (or bitmap's) special
+// priority bit; 2 that bit only where the dot's colour code is one of the special function
+// codes (SFSEL picks code A or B, SFCODE has them; codes are the dot's bits 3-1). SFCCMD alike
+// for colour calculation, and 3: the colour's MSB.
+static bool sf_code(int layer, const Pix& p) {
+    uint8_t code = (uint8_t)(reg(0x26) >> ((reg(0x24) >> layer & 1) * 8));
+    return !p.direct && (code >> ((p.dcc & 0xE) >> 1) & 1);
+}
+
+static uint8_t special_prio(int layer, uint8_t prio, const Pix& p) {
+    int mode = reg(0xEA) >> (layer * 2) & 3;
+    if (!mode) return prio;
+    bool bit = mode == 1 ? p.spr : mode == 2 ? (p.spr && sf_code(layer, p)) : false;
+    return (uint8_t)((prio & ~1) | (bit ? 1 : 0));
+}
+
+static bool special_cc(int layer, bool cc, const Pix& p) {
+    switch (reg(0xEE) >> (layer * 2) & 3) {
+    case 0: return cc;
+    case 1: return cc && p.scc;
+    case 2: return cc && p.scc && sf_code(layer, p);
+    default: return cc && p.msb;
+    }
 }
 
 static uint32_t apply_offset(uint32_t rgb, bool b) {
@@ -602,6 +648,7 @@ void vdp2_compose(Frame& f) {
     uint8_t wctl[L_COUNT];
     uint32_t bk = 0;
     bool bk_lines = false, add = false;
+    uint16_t sfprmd = 0;
     Pix back{};
     auto setup = [&] {
         for (int n = 0; n < 4; ++n) setup_nbg(n, nbg[n]);
@@ -611,6 +658,7 @@ void vdp2_compose(Frame& f) {
         bk = ((uint32_t)(reg(0xAC) & 7) << 16 | reg(0xAE)) * 2;
         bk_lines = reg(0xAC) & 0x8000;
         add = reg(0xEC) >> 8 & 1;
+        sfprmd = reg(0xEA);
         back.offset = reg(0x110) >> 5 & 1;
         back.offset_b = reg(0x112) >> 5 & 1;
     };
@@ -654,18 +702,20 @@ void vdp2_compose(Frame& f) {
                 consider(L_SPRITE);
             Pix& rp = l[L_RBG0];
             rp = {};
-            if (rbg.on && rbg.prio && !(hide & 2) && !(wctl[L_RBG0] && windowed(wctl[L_RBG0], x, y)) && rbg_pixel(rbg, x, rp)) {
-                rp.prio = rbg.prio; rp.ratio = rbg.ratio; rp.cc = rbg.cc; rp.offset = rbg.offset; rp.offset_b = rbg.offset_b;
+            if (rbg.on && (rbg.prio || sfprmd >> 8 & 3) && !(hide & 2) && !(wctl[L_RBG0] && windowed(wctl[L_RBG0], x, y))
+                && rbg_pixel(rbg, x, rp) && (rp.prio = special_prio(4, rbg.prio, rp))) {
+                rp.ratio = rbg.ratio; rp.cc = special_cc(4, rbg.cc, rp); rp.offset = rbg.offset; rp.offset_b = rbg.offset_b;
                 consider(L_RBG0);
             }
             for (int n = 0; n < 4; ++n) {
                 Pix& p = l[L_NBG0 + n];
                 p = {};
                 const Nbg& s = nbg[n];
-                if (!s.on || !s.prio || (hide >> (2 + n) & 1)) continue;
+                if (!s.on || (!s.prio && !(sfprmd >> (n * 2) & 3)) || (hide >> (2 + n) & 1)) continue;
                 if (wctl[L_NBG0 + n] && windowed(wctl[L_NBG0 + n], x, y)) continue;
                 if (!nbg_pixel(s, x, y, p)) continue;
-                p.prio = s.prio; p.ratio = s.ratio; p.cc = s.cc; p.offset = s.offset; p.offset_b = s.offset_b;
+                if (!(p.prio = special_prio(n, s.prio, p))) { p = {}; continue; }
+                p.ratio = s.ratio; p.cc = special_cc(n, s.cc, p); p.offset = s.offset; p.offset_b = s.offset_b;
                 consider(L_NBG0 + n);
             }
             const Pix& t = top >= 0 ? l[top] : back;
