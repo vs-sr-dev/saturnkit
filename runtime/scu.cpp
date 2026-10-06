@@ -11,6 +11,8 @@
 // through the ordinary memory functions, so a transfer to a device's
 // registers or from the CD block's data port does what the CPU would.
 #include "saturn.h"
+#include <cstdio>
+#include <cstring>
 
 static uint32_t g_ist, g_ims = 0xBFFFu;
 static uint32_t g_t0c, g_t1s, g_t1md;
@@ -69,15 +71,20 @@ static void dma_run(int lvl) {
     uint32_t wadd = (d.ad & 7) ? 1u << (d.ad & 7) : 0;
     if (d.md >> 24 & 1) {                       // indirect: {count, write, read} triples at the write address
         uint32_t t = d.w, n = 0;
+        char first[160] = "";                   // the first transfers, for the trace
         for (;;) {
             uint32_t cnt = ld32(t), dst = ld32(t + 4), src = ld32(t + 8);
             bool end = src >> 31;
             src &= 0x07FFFFFFu;
+            if (n < 3) {
+                size_t l = std::strlen(first);
+                std::snprintf(first + l, sizeof first - l, "%s%X bytes %08X -> %08X", n ? ", " : ": ", cnt, src, dst);
+            }
             copy(src, dst, cnt ? cnt : (lvl ? 0x1000 : 0x100000), radd, wadd);
             t += 12; ++n;
             if (end || n > 4096) break;
         }
-        sat_trace("SCU DMA %d indirect: %u transfers from the table at %08X", lvl, n, d.w);
+        sat_trace("SCU DMA %d indirect: %u transfers from the table at %08X%s%s", lvl, n, d.w, first, n > 3 ? ", ..." : "");
         if (d.md >> 8 & 1) d.w = t;
     } else {
         uint32_t cnt = d.c & (lvl ? 0xFFF : 0xFFFFF);
