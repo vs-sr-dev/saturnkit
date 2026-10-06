@@ -4,7 +4,8 @@
 // 0x06002000, the 1st read file (the first file record of the root
 // directory) to the 1st read address, the vector tables and the service
 // pointers in the work area, VBR at 0x06000000, the stack from IP.BIN.
-// The security and area code in IP.BIN is not run.
+// The security code in IP.BIN is not run; its area block and initial
+// program are, when a build has IP.BIN as a module (machine.cpp).
 //
 // Every pointer slot of the two vector tables (master 0x06000000, slave
 // 0x06000400, 256 each) holds a "BIOS ROM" address of its own,

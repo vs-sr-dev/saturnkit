@@ -420,11 +420,25 @@ int saturn_main(const SaturnConfig& cfg) {
     if (!m) { std::fprintf(stderr, "no module matches the 1st read file at %08X\n", entry); return 2; }
     sh2_activate(m);
     sat_note("boot: %s at %08X", m->name, entry);
+    // IP.BIN's initial program, when the build has IP.BIN as a module: the
+    // BIOS runs IP.BIN's code from its area block on (each area's `bra`
+    // leads to the next, the last to the initial program), then the 1st
+    // read address if that returns. A game whose initial program is its
+    // crt0 never returns from it.
+    const uint32_t kAreaBlock = 0x06002E00u, first = entry;
+    if (const SH2Module* ip = sh2_identify(0x06002000u)) {
+        sh2_activate(ip);
+        if (sh2_lookup(kAreaBlock)) {
+            entry = kAreaBlock;
+            sat_note("boot: IP.BIN's initial program (%s) from %08X", ip->name, entry);
+        }
+    }
     for (;;) {
         try {
             SH2Func f = sh2_lookup(entry);
             if (!f) sat_fatal("no function at %08X", entry);
             f(g_master);
+            if (entry == kAreaBlock && first != kAreaBlock) { entry = first; continue; }
             sat_fatal("the program at %08X returned", entry);
         } catch (ProgramStart& s) {
             entry = s.addr;
