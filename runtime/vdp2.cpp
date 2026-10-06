@@ -10,8 +10,11 @@
 // priorities with the chip's order for ties (sprite, NBG0, NBG1, NBG2,
 // NBG3); colour calculation of the top two layers (ratio of the top one, or
 // add); the colour offsets A and B; the back screen (one colour or one a
-// line); the display bit. What is not: RBG0 and RBG1 (rotation), line and
-// vertical-cell scroll, mosaic, windows, the line colour screen, special
+// line); windows 0 and 1 (rectangles or line tables, inside or outside, OR
+// or AND) on NBG0-NBG3 and the sprite layer; the display bit. What is not:
+// RBG0 and RBG1 (rotation), line and vertical-cell scroll, mosaic, the
+// sprite window and the colour-calculation and rotation-parameter windows,
+// the line colour screen, special
 // priority and special colour calculation, shadows on VDP2's layers,
 // gradation, extended colour calculation, high and exclusive resolutions.
 // A register that asks for one of them is noted once.
@@ -267,6 +270,64 @@ static bool sprite_pixel(uint16_t d, Pix& p) {
     return p.prio != 0;
 }
 
+// ---- the windows ----------------------------------------------------------------------------
+// Windows 0 and 1: a rectangle (WPSX/WPSY/WPEX/WPEY), or with the line window table on
+// (LWTA bit 15) a start and end X for each line read from VRAM. A layer's WCTL byte: bit 0/2
+// the area of W0/W1 (0 inside, 1 outside), bit 1/3 their enable, bit 7 the logic (0 OR, 1 AND).
+// Where the enabled windows' areas combine, the layer is transparent.
+struct Window { int x0, y0, x1, y1; bool lines; uint32_t table; };
+static Window g_win[2];
+
+static void setup_windows() {
+    bool hires = (reg(0x00) & 6) != 0;          // X counts pixels in hi-res, half-pixels otherwise
+    for (int i = 0; i < 2; ++i) {
+        Window& w = g_win[i];
+        uint32_t b = 0xC0 + i * 8;
+        int sh = hires ? 0 : 1;
+        w.x0 = (reg(b) & 0x3FF) >> sh;
+        w.y0 = reg(b + 2) & 0x1FF;
+        w.x1 = (reg(b + 4) & 0x3FF) >> sh;
+        w.y1 = reg(b + 6) & 0x1FF;
+        uint16_t hi = reg(0xD8 + i * 4), lo = reg(0xDA + i * 4);
+        w.lines = hi & 0x8000;
+        w.table = ((uint32_t)(hi & 7) << 16 | (lo & 0xFFFE)) << 1;
+    }
+}
+
+static bool window_area(int i, int x, int y) {
+    const Window& w = g_win[i];
+    if (y < w.y0 || y > w.y1) return false;
+    int x0 = w.x0, x1 = w.x1;
+    if (w.lines) {
+        int sh = (reg(0x00) & 6) ? 0 : 1;
+        x0 = (vw(w.table + (uint32_t)y * 4) & 0x3FF) >> sh;
+        x1 = (vw(w.table + (uint32_t)y * 4 + 2) & 0x3FF) >> sh;
+    }
+    return x >= x0 && x <= x1;
+}
+
+// true where the windows make this layer transparent (ctl: the layer's WCTL byte)
+static bool windowed(uint8_t ctl, int x, int y) {
+    bool used = false, any = false, all = true;
+    for (int i = 0; i < 2; ++i) {
+        if (!(ctl >> (i * 2 + 1) & 1)) continue;
+        bool in = window_area(i, x, y);
+        bool area = (ctl >> (i * 2) & 1) ? !in : in;
+        used = true; any |= area; all &= area;
+    }
+    return used && (ctl & 0x80 ? all : any);
+}
+
+static uint8_t wctl_of(int layer) {
+    switch (layer) {
+    case L_SPRITE: return (uint8_t)(reg(0xD4) >> 8);
+    case L_NBG0: return (uint8_t)reg(0xD0);
+    case L_NBG1: return (uint8_t)(reg(0xD0) >> 8);
+    case L_NBG2: return (uint8_t)reg(0xD2);
+    default: return (uint8_t)(reg(0xD2) >> 8);
+    }
+}
+
 // ---- composing ------------------------------------------------------------------------------
 static void note_unsupported() {
     static bool noted[8];
@@ -276,7 +337,9 @@ static void note_unsupported() {
     once(0, reg(0x20) & 0x30, "RBG0/RBG1", reg(0x20));
     once(1, reg(0x9A) & 0x3F3F, "line or vertical cell scroll (SCRCTL)", reg(0x9A));
     once(2, reg(0x22) & 0xF, "mosaic (MZCTL)", reg(0x22));
-    once(3, (reg(0xD0) | reg(0xD2) | reg(0xD4) | reg(0xD6)) & 0x2A2A, "windows (WCTL)", reg(0xD0) | reg(0xD2) | reg(0xD4) | reg(0xD6));
+    once(3, ((reg(0xD0) | reg(0xD2) | reg(0xD4)) & 0x2020) || (reg(0xD6) & 0x2A2A),
+         "the sprite window, or the rotation-parameter or colour-calculation window (WCTL)",
+         reg(0xD0) | reg(0xD2) | reg(0xD4) | reg(0xD6));
     once(4, reg(0xE2) & 0x13F, "shadows on VDP2's layers (SDCTL)", reg(0xE2));
     once(5, reg(0xEC) & 0x8600 && reg(0xEC) & 0x5F, "extended colour calculation or gradation (CCCTL)", reg(0xEC));
     once(6, (reg(0x00) & 7) >= 2, "a high or exclusive resolution (TVMD)", reg(0x00));
@@ -303,6 +366,9 @@ void vdp2_compose(Frame& f) {
     note_unsupported();
     Nbg nbg[4];
     for (int n = 0; n < 4; ++n) setup_nbg(n, nbg[n]);
+    setup_windows();
+    uint8_t wctl[L_COUNT];
+    for (int i = 0; i < L_COUNT; ++i) wctl[i] = wctl_of(i) & 0x8F;    // W0, W1, the logic
     const uint16_t* fb = vdp1_display();
     uint32_t bk = ((uint32_t)(reg(0xAC) & 7) << 16 | reg(0xAE)) * 2;
     bool bk_lines = reg(0xAC) & 0x8000;
@@ -322,12 +388,14 @@ void vdp2_compose(Frame& f) {
             };
             // in the order that wins ties: sprite, then NBG0..NBG3
             l[L_SPRITE] = {};
-            if (sprite_pixel(fb[y * 512 + x], l[L_SPRITE])) consider(L_SPRITE);
+            if (!(wctl[L_SPRITE] && windowed(wctl[L_SPRITE], x, y)) && sprite_pixel(fb[y * 512 + x], l[L_SPRITE]))
+                consider(L_SPRITE);
             for (int n = 0; n < 4; ++n) {
                 Pix& p = l[L_NBG0 + n];
                 p = {};
                 const Nbg& s = nbg[n];
                 if (!s.on || !s.prio) continue;
+                if (wctl[L_NBG0 + n] && windowed(wctl[L_NBG0 + n], x, y)) continue;
                 if (!nbg_pixel(s, x, y, p)) continue;
                 p.prio = s.prio; p.ratio = s.ratio; p.cc = s.cc; p.offset = s.offset; p.offset_b = s.offset_b;
                 consider(L_NBG0 + n);
