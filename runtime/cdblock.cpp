@@ -46,7 +46,8 @@ static uint64_t g_next_peri;
 // the drive
 static uint8_t g_status = ST_PAUSE;
 static uint32_t g_fad = 150, g_play_end, g_play_start;
-static int g_repeat, g_repeat_left;
+static int g_repeat, g_repeat_left, g_repeats_done;
+static uint32_t g_cmd_start, g_cmd_end;         // the last Play's positions, as the command gave them
 static bool g_audio_play;
 static uint64_t g_play_t0, g_play_done;         // time the play began, sectors read since
 static int g_getlen = 2048;
@@ -98,7 +99,7 @@ static void report() {
     uint32_t ctrladr;
     int track = track_of(g_fad, &ctrladr);
     uint8_t st = g_status | (g_xfer != X_NONE ? ST_TRNS : 0);
-    g_out[0] = (uint16_t)(st << 8 | (g_repeat & 0xF));
+    g_out[0] = (uint16_t)(st << 8 | (g_repeats_done & 0xF));
     g_out[1] = (uint16_t)(ctrladr << 8 | track);
     g_out[2] = (uint16_t)(1 << 8 | (g_fad >> 16 & 0xFF));
     g_out[3] = (uint16_t)(g_fad & 0xFFFF);
@@ -189,6 +190,7 @@ static bool deliver_sector() {
 static void play_ended() {
     if (g_repeat_left > 0 || g_repeat == 0xF) {
         if (g_repeat != 0xF) --g_repeat_left;
+        if (g_repeats_done < 0xE) ++g_repeats_done;
         g_fad = g_play_start;
         g_play_t0 = sat_now();
         g_play_done = 0;
@@ -205,7 +207,7 @@ void cd_tick() {
         uint64_t rate = g_audio_play ? 75 : 150 * 2;
         uint64_t due = (now - g_play_t0) * rate / 1000000000ull;
         while (g_play_done < due && g_status == ST_PLAY) {
-            if (g_fad >= g_play_end) { play_ended(); break; }
+            if (g_fad >= g_play_end || g_fad < g_play_start) { play_ended(); break; }
             if (!g_audio_play && !deliver_sector()) {       // the buffer is full: wait
                 g_play_t0 = now - g_play_done * 1000000000ull / rate;
                 break;
@@ -270,19 +272,26 @@ static void put_info(const FsFile& f) {
 }
 
 // ---- commands -------------------------------------------------------------------------------
+// Play Disc. A position 0xFFFFFF is the last Play's; an end given in sectors counts from the
+// start given. The mode's low nibble is the repeat count (0xF: for ever), taken only when bits
+// 4-6 are clear (0xFF: no change); bit 7 leaves the pickup where it is, so a stream whose end
+// is pushed further on keeps reading on (GFS_SGL's streams), and a position outside the new
+// range ends the play. As Mednafen's CD block does it.
 static void start_play(uint32_t start, uint32_t end, int mode) {
-    if (start != 0xFFFFFF) {
-        if (start & 0x800000) g_fad = start & 0x7FFFFF;
-        else if (start) g_fad = track_fad(start >> 8, false);
-    }
-    if (end != 0xFFFFFF) {
-        if (end & 0x800000) g_play_end = g_fad + (end & 0x7FFFFF);
-        else if (end) g_play_end = track_fad(end >> 8, true);
-        else g_play_end = cdrom_leadout();
-    }
-    g_repeat = mode & 0xF;                      // 0xF: for ever
+    if (start == 0xFFFFFF) start = g_cmd_start;
+    if (end == 0xFFFFFF) end = g_cmd_end;
+    else if ((start & 0x800000) && (end & 0x800000)) end = 0x800000 | ((start + end) & 0x7FFFFF);
+    g_cmd_start = start;
+    g_cmd_end = end;
+    uint32_t from = start & 0x800000 ? start & 0x7FFFFF : start ? track_fad(start >> 8, false) : g_fad;
+    if (end & 0x800000) g_play_end = end & 0x7FFFFF;
+    else if (end) g_play_end = track_fad(end >> 8, true);
+    else g_play_end = cdrom_leadout();
+    if (!(mode & 0x70)) g_repeat = mode & 0xF;
     g_repeat_left = g_repeat;
-    g_play_start = g_fad;
+    g_repeats_done = 0;
+    g_play_start = from;
+    if (!(mode & 0x80)) g_fad = from;
     g_audio_play = cdrom_is_audio(g_fad);
     g_status = ST_PLAY;
     g_play_t0 = sat_now();
