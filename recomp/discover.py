@@ -912,13 +912,18 @@ class Program:
                 if v is not None:
                     out.add(v)
             elif ins.op == "mova":
+                stores = lambda j: j.op == "mov.l" and (j.m == 0 and j.fmt.startswith("mov.l Rm,@")
+                                                        or j.fmt == "mov.l r0,@(disp,gbr)")
                 for b in range(a + 2, a + 10, 2):
                     j = img.insn(b)
-                    if j.op == "mov.l" and (j.m == 0 and j.fmt.startswith("mov.l Rm,@")
-                                            or j.fmt == "mov.l r0,@(disp,gbr)"):
+                    if stores(j):
                         out.add(ins.target)
                         break
-                    if 0 in _writes(j) or j.op in self._STOPS:
+                    if 0 in _writes(j):
+                        break
+                    if j.op in self._STOPS:            # the store may sit in its delay slot
+                        if stores(img.insn(b + 2)):
+                            out.add(ins.target)
                         break
         self._lit_scanned |= self.code
         return out
