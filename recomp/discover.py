@@ -430,7 +430,7 @@ class Program:
                 return None
             ins = img.insn(a)
             if ins.op in self._STOPS:
-                return None
+                return self._bound_before_bra(a)
             if ins.op in ("shll", "shll2") or (ins.fmt == "add Rm,Rn" and ins.m == ins.n):
                 scaled = True
             if ins.op in ("cmp/hi", "cmp/hs") and a + 2 < at and img.insn(a + 2).op in ("bt", "bt/s"):
@@ -443,6 +443,31 @@ class Program:
                 if m is None or m >= 4096:
                     return None
                 return m + 1 if scaled else m // size + 1
+        return None
+
+    def _bound_before_bra(self, bra):
+        """SHC also checks the range first and jumps over the default:
+        `cmp/hi rB,rX; bf L` (or `bf/s L` and its delay slot), `bra DEFAULT`
+        and its delay slot, L: the table's code. The number of entries
+        from that `cmp`, when `bra` is one and the `bf` lands right after
+        its delay slot; None otherwise."""
+        img = self.img
+        if img.insn(bra).op != "bra":
+            return None
+        start = bra + 4
+        for b, op in ((bra - 2, "bf"), (bra - 4, "bf/s")):
+            if not self.inside(b - 2):
+                return None
+            br = img.insn(b)
+            if br.op != op or br.target != start:
+                continue
+            cmp = img.insn(b - 2)
+            if cmp.op not in ("cmp/hi", "cmp/hs"):
+                return None
+            k = self._reg_const(b - 2, cmp.m)
+            if k is None:
+                return None
+            return k + 1 if cmp.op == "cmp/hi" else k
         return None
 
     def _reg_const(self, at, reg):
